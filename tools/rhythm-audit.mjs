@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
+import { detectBpm } from '../js/core/bpmDetect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -369,16 +370,20 @@ function analyzeWav(opts) {
   }
   const tempo = estimateTempo(flux, hopSec);
   report.tempo = tempo;
-  // 去鼓曲沒有每拍的大鼓，onset 密度以八分音符為主：估計值為 bpm 或其 2 倍（例 176）都視為 bpm，並在說明中記錄。
-  const ratio = tempo.bpm / bpm;
-  const direct = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - bpm) <= 0.5;
-  const doubled = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - 2 * bpm) <= 1.0;
-  const halved = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - bpm / 2) <= 0.5;
-  // 切分音（例：午夜放克的十六分貝斯）或十六分琶音會讓自相關峰落在簡單比例（×4/3、×3/4、×2/3、×3/2）：同樣視為同一 tempo 並記錄。
-  const dotted = Number.isFinite(tempo.bpm) && [4 / 3, 3 / 4, 2 / 3, 3 / 2].some((r) => Math.abs(tempo.bpm - bpm * r) <= 0.01 * bpm * r + 0.5);
-  c.check('A3', `獨立估計 tempo = ${bpm} BPM（或 ×2 = ${2 * bpm}、切分音的 ×4/3、×2/3 等簡單比例，視為同一 tempo）`,
-    direct || doubled || halved || dotted,
-    `估計 ${f(tempo.bpm, 3)} BPM（信心 ${f(tempo.confidence, 2)}）${direct ? '' : doubled ? `；為標稱的 ${f(ratio, 2)} 倍（去鼓伴奏的 onset 落在八分音符，倍速判定為 ${bpm}）` : halved ? '；為標稱的一半，視為同一 tempo' : dotted ? `；為標稱的 ${f(ratio, 3)} 倍（切分音／琶音的簡單比例週期，視為同一 tempo）` : ''}`, tempo);
+  // A3：遊戲自己的 detectBpm（選單「自動偵測」用的同一個模組）必須回報歌曲的 BPM（±0.5）。
+  // 剛好差一個八度（×2 或 ÷2）→ WARN；其他一律 FAIL。
+  let det = null;
+  try { det = detectBpm(wav.samples, wav.sampleRate); } catch (e) { det = { bpm: NaN, error: e.message }; }
+  report.detectBpm = det;
+  const dBpm = det && Number.isFinite(det.bpm) ? det.bpm : NaN;
+  const exact = Math.abs(dBpm - bpm) <= 0.5;
+  const octave = Math.abs(dBpm - 2 * bpm) <= 1.0 || Math.abs(dBpm - bpm / 2) <= 0.25;
+  c.add('A3', `遊戲 detectBpm（js/core/bpmDetect.js）= ${bpm} BPM（±0.5）`, exact ? 'PASS' : octave ? 'WARN' : 'FAIL',
+    `detectBpm=${f(dBpm, 3)} BPM（信心 ${f(det && det.confidence, 2)}，第一拍 ${f(((det && det.offsetSec) || 0) * 1000, 1)} ms）${exact ? '' : octave ? '；差一個八度（×2 或 ÷2）' : '；與標稱 BPM 不符'}`, det);
+  // 獨立自相關估計：僅供參考（切分音曲目可能落在簡單比例）
+  const tempo = estimateTempo(flux, hopSec);
+  report.tempo = tempo;
+  c.add('A3i', '獨立自相關 tempo 估計（僅供參考）', 'INFO', `估計 ${f(tempo.bpm, 3)} BPM（信心 ${f(tempo.confidence, 2)}；標稱 ${bpm}，比值 ${f(tempo.bpm / bpm, 3)}）`, tempo);
   return { checks: c.items, report };
 }
 
