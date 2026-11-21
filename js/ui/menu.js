@@ -1,6 +1,8 @@
 // HTML menu wiring (DESIGN section 9.1).
 import { TapTempo } from '../core/tapTempo.js';
 import { clampBpm, beatInfoAt, pulseAt } from '../core/beatMath.js';
+import { resolveSubdivision, SUBDIVISION_NAMES } from '../core/beatSnap.js';
+import { sanitizeSubdivision } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -33,14 +35,23 @@ export class Menu {
     $('offset-num').value = String(Math.round(s.offsetMs));
     $('calib-num').value = String(Math.round(s.inputCalibrationMs));
     $('grace-num').value = String(Math.round(s.lateGraceMs));
-    for (const r of document.querySelectorAll('input[name="quant"]')) r.checked = r.value === s.quantizeMode;
+    for (const r of document.querySelectorAll('input[name="subdiv"]')) r.checked = r.value === String(s.subdivision);
+    this.updateSubdivInfo();
     $('chk-metronome').checked = s.metronome;
     $('chk-reduce').checked = s.reduceFlashing;
     $('music-vol').value = String(s.musicVol);
     $('sfx-vol').value = String(s.sfxVol);
   }
 
-  _changed() { this.app.settingsChanged(); }
+  /** 「目前：十六分（每格 170 ms）」 */
+  updateSubdivInfo() {
+    const s = this.app.settings;
+    const d = resolveSubdivision(s.subdivision, s.bpm);
+    const ms = Math.round((60000 / s.bpm) / d);
+    $('subdiv-info').textContent = `目前：${SUBDIVISION_NAMES[d]}（每格 ${ms} ms）${s.subdivision === 'auto' ? '，自動選擇' : ''}`;
+  }
+
+  _changed() { this.updateSubdivInfo(); this.app.settingsChanged(); }
 
   _bind() {
     const app = this.app;
@@ -93,7 +104,7 @@ export class Menu {
 
     $('calib-num').addEventListener('input', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { s().inputCalibrationMs = Math.max(-150, Math.min(150, v)); this._changed(); } });
     $('grace-num').addEventListener('input', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { s().lateGraceMs = Math.max(0, Math.min(100, v)); this._changed(); } });
-    for (const r of document.querySelectorAll('input[name="quant"]')) r.addEventListener('change', () => { if (r.checked) { s().quantizeMode = r.value; this._changed(); } });
+    for (const r of document.querySelectorAll('input[name="subdiv"]')) r.addEventListener('change', () => { if (r.checked) { s().subdivision = sanitizeSubdivision(r.value); this._changed(); } });
     $('chk-metronome').addEventListener('change', (e) => { s().metronome = e.target.checked; this._changed(); });
     $('chk-reduce').addEventListener('change', (e) => { s().reduceFlashing = e.target.checked; this._changed(); });
     $('music-vol').addEventListener('input', (e) => { s().musicVol = parseFloat(e.target.value); this._changed(); });

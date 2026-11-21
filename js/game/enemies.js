@@ -3,6 +3,10 @@
 import { beatInfoAt, pulseAt } from '../core/beatMath.js';
 import { hash01 } from '../core/rng.js';
 import { FONT, COLORS } from './constants.js';
+import { stage, intensityOf } from './disco.js';
+
+let parryHints = 0; // the 「出手招架」 hint is shown for the first few telegraphs only
+const HINT_MAX = 4;
 
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp01 = (t) => Math.min(1, Math.max(0, t));
@@ -14,6 +18,80 @@ class Enemy {
     this.id = id; this.type = type; this.x = x; this.y = 400;
     this.hp = hp; this.maxHp = hp; this.r = r;
     this.facing = -1; this.flash = 0; this.dead = false; this.shake = 0;
+    this.strikeTick = null; // tick (32nd note) of the strike beat while telegraphing; null otherwise
+    this.stunned = false; this.stunSince = 0; this.curEv = null; this.showHint = false; this.bd = 0.68;
+  }
+  /** Set the strike tick for the beat after the telegraph beat. */
+  armStrike(ev) {
+    this.strikeTick = (ev.beatIndex + 1) * 8;
+    this.showHint = parryHints < HINT_MAX;
+    if (this.showHint) parryHints++;
+  }
+  /** Ask the combat system whether the player's queued attack lands on this strike beat. */
+  tryParry(g, ev) {
+    const atk = this.strikeTick !== null && g.combat && typeof g.combat.findParry === 'function' ? g.combat.findParry(this) : null;
+    if (atk) { this.parry(g, atk, ev); return true; }
+    return false;
+  }
+  /** Parried: cancel the strike, stun until the next bar downbeat beat event (Game applies the x2 damage). */
+  parry(g, attack, ev = this.curEv) {
+    this.strikeTick = null; this.showHint = false;
+    this.stunned = true; this.stunSince = g.vst ?? 0;
+    if (this.state === 'strike' || this.state === 'tele' || this.state === 'swoop') this.state = this.type === 'bat' ? 'hover' : 'idle';
+    this.tele = false;
+    const fx = g.effects;
+    const top = this.y - this.r * 2 - 30;
+    fx.text(this.x, top, 'PARRY!', { color: '#ffe45e', size: 30, life: 0.9, rise: 34, channel: 'parry' });
+    fx.parryBurst(this.x, this.cy);
+    if (ev) { g.logWorld('parry', this.id, ev); g.logWorld('enemy-stun', this.id, ev); }
+    void attack;
+  }
+  /** Stunned enemies skip the beat; they wake on the next bar downbeat (and still act on that beat). */
+  skipStunned(ev) {
+    this.curEv = ev;
+    if (!this.stunned) return false;
+    if (ev.beatInBar === 0) { this.stunned = false; return false; }
+    return true;
+  }
+  /** Shrinking ring that reaches its minimum exactly at strikeTick's song time (derived from vst). */
+  drawTelegraph(ctx, vst, cy, minR) {
+    if (this.strikeTick === null) return;
+    const remain = this.strikeTick * this.bd / 8 - vst;
+    const u = clamp01(remain / this.bd);
+    const R = minR + 46 * u * u + 8 * u;
+    const near = remain < this.bd * 0.12;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(255,228,94,0.35)';
+    ctx.setLineDash([4, 5]);
+    ctx.beginPath(); ctx.arc(this.x, cy, minR, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = near ? 5 : 3.5;
+    ctx.strokeStyle = near ? '#ffffff' : '#ffe45e';
+    ctx.shadowColor = '#ffe45e'; ctx.shadowBlur = near ? 20 : 10;
+    ctx.globalAlpha = 0.45 + 0.55 * (1 - u);
+    ctx.beginPath(); ctx.arc(this.x, cy, R, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    if (this.showHint) {
+      ctx.save(); ctx.textAlign = 'center'; ctx.font = `800 14px ${FONT}`;
+      ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(8,2,28,0.9)'; ctx.fillStyle = '#ffe45e'; ctx.lineJoin = 'round';
+      ctx.strokeText('出手招架', this.x, this.y + 24); ctx.fillText('出手招架', this.x, this.y + 24);
+      ctx.restore();
+    }
+  }
+  drawStun(ctx, vst, top) {
+    if (!this.stunned) return;
+    ctx.save();
+    ctx.fillStyle = '#ffe45e'; ctx.shadowColor = '#ffe45e'; ctx.shadowBlur = 8;
+    for (let k = 0; k < 3; k++) {
+      const a = vst * 6 + k * Math.PI * 2 / 3;
+      const sx = this.x + Math.cos(a) * 16; const sy = top + Math.sin(a) * 4;
+      ctx.beginPath();
+      for (let m = 0; m < 8; m++) { const rr = m % 2 ? 2.2 : 5; const aa = m * Math.PI / 4 - Math.PI / 2; ctx.lineTo(sx + Math.cos(aa) * rr, sy + Math.sin(aa) * rr); }
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
   }
   get cy() { return this.y - this.r; } // body centre
   shove(dx) { this.x += dx; }
@@ -29,6 +107,7 @@ class Enemy {
 export class Slime extends Enemy {
   constructor(id, x) { super(id, 'slime', x, 2, 17); this.hop = { t0: -1e9, from: x, to: x }; this.bd = 0.68; this.air = 0; this.landT = 0; }
   onBeat(ev, g) {
+    if (this.skipStunned(ev)) return;
     const dx = g.player.x - this.x;
     const dir = Math.sign(dx) || 1;
     this.facing = dir;
@@ -72,6 +151,7 @@ export class Slime extends Enemy {
     const ex = this.facing * 4;
     ctx.beginPath(); ctx.arc(ex - 6, -17, 3.4, 0, Math.PI * 2); ctx.arc(ex + 6, -17, 3.4, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
+    this.drawStun(ctx, vst, this.y - 46);
     this.drawHp(ctx);
   }
 }
@@ -87,12 +167,20 @@ export class Bat extends Enemy {
   }
   get cy() { return this.y; }
   onBeat(ev, g) {
+    if (this.skipStunned(ev)) return;
     const bi = ev.beatInBar;
-    if (bi === 2) {
-      this.state = 'tele'; this.tele = true;
+    const inten = intensityOf(g, ev.barIndex);
+    // low sections: swoop only every 2nd bar; mid/high: every bar (high also hovers faster)
+    const attackBar = inten !== 'low' || ev.barIndex % 2 === 1;
+    this.fast = inten === 'high';
+    if (bi === 2 && attackBar) {
+      this.state = 'tele'; this.tele = true; this.armStrike(ev);
       g.logWorld('bat-telegraph', this.id, ev);
-    } else if (bi === 3) {
-      this.state = 'swoop'; this.tele = false;
+    } else if (bi === 3 && this.state === 'tele') {
+      this.tele = false;
+      if (this.tryParry(g, ev)) return;
+      this.strikeTick = null;
+      this.state = 'swoop';
       const tx = Math.min(this.x + 200, Math.max(this.x - 200, g.player.x));
       this.sw = { t0: ev.beatSongTime, fx: this.x, fy: this.y, tx, ty: g.player.y - 30 };
       g.logWorld('bat-swoop', this.id, ev);
@@ -103,7 +191,7 @@ export class Bat extends Enemy {
         const dir = Math.sign(g.player.x - this.x) || 1;
         this.facing = dir;
         const dist = Math.min(150, Math.max(0, Math.abs(g.player.x - this.x) - 30));
-        this.mv = { t0: ev.beatSongTime, dur: 0.5, from: this.x, to: this.x + dir * dist };
+        this.mv = { t0: ev.beatSongTime, dur: this.fast ? 0.35 : 0.5, from: this.x, to: this.x + dir * dist };
       }
     }
   }
@@ -160,7 +248,9 @@ export class Bat extends Enemy {
     ctx.fillStyle = this.tele ? '#fff' : '#ffe45e';
     ctx.beginPath(); ctx.arc(-3.5, -2, 2.2, 0, Math.PI * 2); ctx.arc(3.5, -2, 2.2, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
+    this.drawTelegraph(ctx, vst, this.y, 26);
     if (this.tele) this.drawBang(ctx, this.x, this.y - 30);
+    this.drawStun(ctx, vst, this.y - 24);
   }
   drawBang(ctx, x, y) {
     ctx.save(); ctx.textAlign = 'center'; ctx.font = `900 24px ${FONT}`;
@@ -176,7 +266,10 @@ export class Guard extends Enemy {
     this.strikeT0 = -1e9; this.strikeDone = true; this.blockT = 0; this.bd = 0.68;
   }
   onBeat(ev, g) {
+    if (this.skipStunned(ev)) return;
     const bi = ev.beatInBar;
+    const inten = intensityOf(g, ev.barIndex);
+    const attackBar = inten !== 'low' || ev.barIndex % 2 === 1; // calm sections: guards strike every 2nd bar
     this.state = this.state === 'strike' ? 'idle' : this.state;
     const dx = g.player.x - this.x;
     if (bi === 0 || bi === 2) {
@@ -185,8 +278,10 @@ export class Guard extends Enemy {
       this.step = { t0: ev.beatSongTime, from: this.x, to: this.x + this.facing * dist };
       g.logWorld('guard-step', this.id, ev);
     }
-    if (bi === 2) { this.state = 'tele'; g.logWorld('guard-telegraph', this.id, ev); }
-    else if (bi === 3) {
+    if (bi === 2 && attackBar) { this.state = 'tele'; this.armStrike(ev); g.logWorld('guard-telegraph', this.id, ev); }
+    else if (bi === 3 && this.state === 'tele') {
+      if (this.tryParry(g, ev)) return;
+      this.strikeTick = null;
       this.state = 'strike'; this.strikeT0 = ev.beatSongTime; this.strikeDone = false;
       g.logWorld('guard-strike', this.id, ev);
     }
@@ -236,6 +331,8 @@ export class Guard extends Enemy {
     ctx.shadowColor = '#4df3ff'; ctx.shadowBlur = flashShield ? 24 : 10; ctx.lineWidth = 3.5;
     ctx.beginPath(); ctx.moveTo(14, -54); ctx.lineTo(26, -48); ctx.lineTo(26, -22); ctx.lineTo(14, -12); ctx.lineTo(8, -30); ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.restore();
+    this.drawTelegraph(ctx, vst, this.y - 34, 34);
+    this.drawStun(ctx, vst, this.y - 76);
     if (this.state === 'tele') {
       ctx.save(); ctx.textAlign = 'center'; ctx.font = `900 26px ${FONT}`;
       ctx.fillStyle = '#ff4d6d'; ctx.strokeStyle = '#1a0630'; ctx.lineWidth = 4;
@@ -245,17 +342,26 @@ export class Guard extends Enemy {
   }
 }
 
-/** Wave table: which enemies spawn on the downbeat of bar `bar` (deterministic). */
-export function waveFor(bar) {
+/**
+ * Wave table: which enemies spawn on the downbeat of bar `bar` (deterministic).
+ * Intensity (spec section 8) defaults to the running game's section map: low = fewer, high = more/harder.
+ */
+export function waveFor(bar, intensity) {
   if (bar < 2) return [];
+  if (!intensity) intensity = intensityOf(stage.game, bar);
   const t = bar - 2;
   const r = hash01(bar, 5);
-  const tier = Math.min(4, Math.floor(t / 8));
-  const out = [];
+  const tier = Math.min(4, Math.floor(t / 8) + (intensity === 'high' ? 1 : 0));
+  let out = [];
   if (tier === 0) { if (t % 2 === 0) out.push('slime'); if (t === 4) out.push('slime'); }
   else if (tier === 1) { if (t % 2 === 0) out.push(r < 0.5 ? 'slime' : 'bat'); else if (r < 0.35) out.push('slime'); }
   else if (tier === 2) { out.push(r < 0.5 ? 'slime' : 'bat'); if (t % 4 === 0) out.push('guard'); }
   else { out.push(r < 0.4 ? 'slime' : 'bat'); if (t % 2 === 0) out.push('guard'); if (r > 0.75) out.push('slime'); }
+  if (intensity === 'low') out = t % 2 === 0 ? out.slice(0, 1) : [];
+  else if (intensity === 'high') {
+    out.push(t % 2 ? 'bat' : 'slime');
+    if (t % 3 === 0 && !out.includes('guard')) out.push('guard');
+  }
   return out;
 }
 

@@ -11,6 +11,7 @@ import { showResults, hideResults } from './ui/results.js';
 import { loadSettings, saveSettings } from './ui/settings.js';
 import { installDebugHook, pushLog } from './debug/debugHook.js';
 import { clampBpm } from './core/beatMath.js';
+import { sanitizeSubdivision } from './ui/settings.js';
 import { W, H } from './game/constants.js';
 
 const $ = (id) => document.getElementById(id);
@@ -111,6 +112,35 @@ class App {
 
   _fmtDur(sec) { const m = Math.floor(sec / 60), s = Math.floor(sec % 60); return `${m}:${String(s).padStart(2, '0')}`; }
 
+  /**
+   * Song map (intensity per bar). Default song: hand-made `sections` from its JSON; uploaded songs: analyzed
+   * with analyzeSongMap (dynamic import, any failure falls back to null = all 'mid'). Cached per song/BPM/offset.
+   */
+  async getSongMap() {
+    const song = this.song;
+    if (!song) return null;
+    const s = this.settings;
+    if (song.isDefault && song.meta && Array.isArray(song.meta.sections) && song.meta.sections.length) {
+      return { sections: song.meta.sections };
+    }
+    const key = `${s.bpm}|${s.offsetMs}`;
+    if (song.mapKey === key) return song.map;
+    let map = null;
+    try {
+      const buf = song.buffer;
+      const mono = new Float32Array(buf.length);
+      for (let c = 0; c < buf.numberOfChannels; c++) {
+        const d = buf.getChannelData(c);
+        for (let i = 0; i < mono.length; i++) mono[i] += d[i] / buf.numberOfChannels;
+      }
+      const mod = await import('./core/songMap.js');
+      const r = mod.analyzeSongMap(mono, buf.sampleRate, { bpm: s.bpm, offsetSec: s.offsetMs / 1000, beatsPerBar: 4 });
+      if (r && Array.isArray(r.sections) && r.sections.length) map = r;
+    } catch (e) { map = null; }
+    song.map = map; song.mapKey = key;
+    return map;
+  }
+
   // ---------- settings ----------
   settingsChanged() {
     saveSettings(this.settings);
@@ -157,7 +187,7 @@ class App {
       const s = this.settings;
       if (opts.bpm !== undefined) s.bpm = clampBpm(opts.bpm);
       if (opts.offsetMs !== undefined) s.offsetMs = Math.max(0, opts.offsetMs);
-      if (opts.quantizeMode !== undefined) s.quantizeMode = opts.quantizeMode === 'beat' ? 'beat' : 'half';
+      if (opts.subdivision !== undefined) s.subdivision = sanitizeSubdivision(opts.subdivision);
       if (opts.lateGraceMs !== undefined) s.lateGraceMs = Math.max(0, opts.lateGraceMs);
       if (!opts.fromDebug) saveSettings(s);
       if (!this.song) await this.useDefaultSong(false);
@@ -169,6 +199,7 @@ class App {
       cond.clearListeners();
       this.engine.stopMetronome();
       this.engine.stopSong();
+      const songMap = await this.getSongMap(); // may take a moment for uploaded songs; do it before beat 0 is placed
 
       // DESIGN 5.4: one bar of count-in.
       const beat0 = ctx.currentTime + 0.15 + 4 * cond.beatDur;
@@ -178,7 +209,7 @@ class App {
 
       const game = new Game({
         settings: s, conductor: cond, engine: this.engine,
-        songName: this.song.name, songDurationSec: this.song.buffer.duration,
+        songName: this.song.name, songDurationSec: this.song.buffer.duration, songMap,
       });
       game.invincible = this.invincible;
       this.game = game;

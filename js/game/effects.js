@@ -1,17 +1,18 @@
 // Particles, floating texts, slash arcs, rings and screen flash. Uses wall-clock dt.
 import { FONT } from './constants.js';
+import { LEVEL_NAMES, LEVEL_COLORS, COMBO_NAMES } from './disco.js';
 
 export class Effects {
   constructor() { this.clear(); }
   clear() { this.particles = []; this.texts = []; this.arcs = []; this.rings = []; this.flash = 0; this.flashColor = '#ffffff'; }
 
-  burst(x, y, n, { color = '#fff', speed = 180, angle = null, spread = Math.PI * 2, life = 0.5, size = 3, gravity = 380 } = {}) {
+  burst(x, y, n, { color = '#fff', speed = 180, angle = null, spread = Math.PI * 2, life = 0.5, size = 3, gravity = 380, shape = 'rect' } = {}) {
     for (let i = 0; i < n; i++) {
       const a = (angle === null ? Math.random() * Math.PI * 2 : angle + (Math.random() - 0.5) * spread);
       const sp = speed * (0.35 + Math.random() * 0.8);
       this.particles.push({
         x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life, max: life * (0.7 + Math.random() * 0.5),
-        size: size * (0.6 + Math.random() * 0.9), color, gravity,
+        size: size * (0.6 + Math.random() * 0.9), color, gravity, shape,
       });
     }
     if (this.particles.length > 600) this.particles.splice(0, this.particles.length - 600);
@@ -31,6 +32,31 @@ export class Effects {
     }
     this.texts.push({ x, y, str, color, size, life, max: life, rise, sub, subColor: subColor || color, channel });
     if (this.texts.length > 40) this.texts.shift();
+  }
+
+  /** PARRY stars + gold rings. */
+  parryBurst(x, y) {
+    this.burst(x, y, 14, { color: '#ffe45e', speed: 260, life: 0.7, size: 7, shape: 'star', gravity: 120 });
+    this.burst(x, y, 8, { color: '#ffffff', speed: 180, life: 0.5, size: 3 });
+    this.ring(x, y, 54, '#ffe45e', 0.4); this.ring(x, y, 34, '#ffffff', 0.28);
+  }
+
+  /**
+   * Judgment popup on its own channel: row 1 = 準拍/離拍 + judgment word, row 2 = level name.
+   * Combo names go to the 'combo' channel above it (see comboText) so the rows never overlap.
+   */
+  judge(x, y, { judgment = 'good', onBeat = false, level = null, size = null } = {}) {
+    const col = { perfect: '#ffe45e', great: '#5cf2ff', good: '#7dff9a' }[judgment] || '#e0dcff';
+    const word = { perfect: 'PERFECT', great: 'GREAT', good: 'GOOD', off: 'OFF' }[judgment] || String(judgment).toUpperCase();
+    this.text(x, y, `${onBeat ? '準拍' : '離拍'} ${word}`, {
+      color: onBeat ? col : '#a6a1c4', size: size || (judgment === 'perfect' ? 24 : 20), life: 0.62, rise: 26, channel: 'judge',
+      sub: level ? (LEVEL_NAMES[level] || level) : null, subColor: LEVEL_COLORS[level] || '#e0dcff',
+    });
+  }
+
+  comboText(x, y, combo) {
+    const name = COMBO_NAMES[combo];
+    if (name) this.text(x, y, `${name}!`, { color: combo === 'bar' ? '#ffd24d' : combo === 'fill' ? '#ff9f4d' : '#ff4fd8', size: 30, life: 1.0, rise: 36, channel: 'combo' });
   }
 
   /** Slash arc / thrust streak. kind: front | down | back | combo8 */
@@ -98,7 +124,11 @@ export class Effects {
     for (const p of this.particles) {
       ctx.globalAlpha = Math.max(0, Math.min(1, p.life / p.max));
       ctx.fillStyle = p.color;
-      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+      if (p.shape === 'star') {
+        ctx.beginPath();
+        for (let m = 0; m < 8; m++) { const rr = m % 2 ? p.size * 0.4 : p.size; const aa = m * Math.PI / 4 - Math.PI / 2 + p.life * 3; ctx.lineTo(p.x + Math.cos(aa) * rr, p.y + Math.sin(aa) * rr); }
+        ctx.closePath(); ctx.fill();
+      } else ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
     }
     ctx.globalAlpha = 1;
     ctx.restore();

@@ -91,11 +91,16 @@
           </div>
         </div>
         <div class="field">
-          <span class="lbl">量化模式</span>
+          <span class="lbl">落點切分</span>
           <div class="row">
-            <label class="radio"><input type="radio" name="quant" value="half" checked> 八分（前拍＋後拍）</label>
-            <label class="radio"><input type="radio" name="quant" value="beat"> 四分（僅前拍）</label>
+            <label class="radio"><input type="radio" name="subdiv" value="auto" checked> 自動</label>
+            <label class="radio"><input type="radio" name="subdiv" value="1"> 四分</label>
+            <label class="radio"><input type="radio" name="subdiv" value="2"> 八分</label>
+            <label class="radio"><input type="radio" name="subdiv" value="4"> 十六分</label>
+            <label class="radio"><input type="radio" name="subdiv" value="8"> 三十二分</label>
           </div>
+          <p class="hint" id="subdiv-info">目前：十六分（每格 170 ms）</p>
+          <p class="hint">按下後攻擊會立即起手，並落在這個切分網格上（離拍也不會消失，只是較弱）；自動＝依 BPM 取每格不短於約 110 ms 的最細切分</p>
         </div>
         <div class="row">
           <label class="check"><input id="chk-metronome" type="checkbox" checked> 節拍器</label>
@@ -139,8 +144,8 @@
         <tbody>
           <tr><th>最大連擊鏈</th><td id="res-chain">0</td><th>連段次數</th><td id="res-combos">0</td></tr>
           <tr><th>PERFECT</th><td id="res-perfect">0</td><th>GREAT</th><td id="res-great">0</td></tr>
-          <tr><th>GOOD</th><td id="res-good">0</td><th>AUTO</th><td id="res-auto">0</td></tr>
-          <tr><th>前拍斬</th><td id="res-front">0</td><th>後拍刺</th><td id="res-back">0</td></tr>
+          <tr><th>GOOD</th><td id="res-good">0</td><th>離拍 OFF</th><td id="res-auto">0</td></tr>
+          <tr><th>前拍斬（含半小節）</th><td id="res-front">0</td><th>後拍刺（含碎拍）</th><td id="res-back">0</td></tr>
           <tr><th>強拍斬</th><td id="res-down">0</td><th>擊敗敵人</th><td id="res-kills">0</td></tr>
         </tbody>
       </table>

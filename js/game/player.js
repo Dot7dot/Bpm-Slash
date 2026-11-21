@@ -40,20 +40,35 @@ export class Player {
 
   get bodyY() { return this.y - 32; }
 
-  /** Sword pose parameters for the current attack stage. */
+  /**
+   * Sword pose parameters for the current attack stage (docs/DESIGN-BEATSNAP.md section 5).
+   * windup (stretches to fit the gap before the connect tick) -> slash (fixed length, blade tip is farthest on
+   * the connect time) -> recover. Look per move: bar = big diagonal chop, half/beat = horizontal sweep,
+   * eighth = thrust, sixteenth/thirtysecond = short rapid stab.
+   */
   _swordPose() {
     const rest = { th: -40 * DEG, reach: 14, lean: 0 };
     const pose = this.pose;
     if (!pose) return rest;
     const { kind, stage, p } = pose;
-    if (kind === 'back' || kind === 'combo8') {
+    if (kind === 'sub') { // short rapid stab
+      if (stage === 'windup') { const e = easeOut(p); return { th: lerp(-40, -12, e) * DEG, reach: lerp(14, 8, e), lean: -0.04 * e }; }
+      if (stage === 'slash') { const e = easeOut(p); return { th: -8 * DEG, reach: lerp(8, 24, e), lean: lerp(-0.04, 0.1, e) }; }
+      const e = easeIn(p); return { th: lerp(-8, -40, e) * DEG, reach: lerp(24, 14, e), lean: lerp(0.1, 0, e) };
+    }
+    if (kind === 'back' || kind === 'combo8') { // long thrust
       if (stage === 'windup') { const e = easeOut(p); return { th: lerp(-40, -4, e) * DEG, reach: lerp(14, 3, e), lean: -0.1 * e }; }
       if (stage === 'slash') { const e = easeOut(p); return { th: -4 * DEG, reach: lerp(3, 32, e), lean: lerp(-0.1, 0.22, e) }; }
       const e = easeIn(p); return { th: lerp(-4, -40, e) * DEG, reach: lerp(32, 14, e), lean: lerp(0.22, 0, e) };
     }
-    const big = kind === 'down' || kind === 'finisher';
-    const up = (big ? -168 : -140) * DEG;
-    const down = (big ? 85 : 62) * DEG;
+    if (kind === 'front') { // horizontal sweep: behind the head down to a level, forward-pointing blade
+      const up = -118 * DEG, fwd = 6 * DEG;
+      if (stage === 'windup') { const e = easeOut(p); return { th: lerp(-40 * DEG, up, e), reach: lerp(14, 8, e), lean: -0.16 * e }; }
+      if (stage === 'slash') { const e = easeOut(p); return { th: lerp(up, fwd, e), reach: lerp(8, 22, e), lean: lerp(-0.16, 0.26, e) }; }
+      const e = easeIn(p); return { th: lerp(fwd, -40 * DEG, e), reach: lerp(22, 14, e), lean: lerp(0.26, 0, e) };
+    }
+    // down / finisher / fill: big overhead diagonal chop
+    const up = -168 * DEG, down = 85 * DEG;
     if (stage === 'windup') { const e = easeOut(p); return { th: lerp(-40 * DEG, up, e), reach: lerp(14, 11, e), lean: -0.2 * e }; }
     if (stage === 'slash') { const e = easeOut(p); return { th: lerp(up, down, e), reach: lerp(11, 18, e), lean: lerp(-0.2, 0.3, e) }; }
     const e = easeIn(p); return { th: lerp(down, -40 * DEG, e), reach: lerp(18, 14, e), lean: lerp(0.3, 0, e) };
@@ -125,7 +140,7 @@ export class Player {
     // sword
     const L = 38;
     const tx = hx + Math.cos(sp.th) * L, ty = hyy + Math.sin(sp.th) * L;
-    const big = this.pose && (this.pose.kind === 'down' || this.pose.kind === 'finisher');
+    const big = this.pose && (this.pose.kind === 'down' || this.pose.kind === 'finisher' || this.pose.kind === 'fill');
     ctx.strokeStyle = big ? '#ffe9a3' : '#f4f9ff'; ctx.shadowColor = big ? COLORS.down : COLORS.front;
     ctx.shadowBlur = big ? 18 : 12; ctx.lineWidth = big ? 5 : 4;
     ctx.beginPath(); ctx.moveTo(hx + Math.cos(sp.th) * 4, hyy + Math.sin(sp.th) * 4); ctx.lineTo(tx, ty); ctx.stroke();

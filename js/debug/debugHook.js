@@ -1,4 +1,6 @@
 // Debug hook contract (DESIGN section 10): window.__BPM_SLASH_DEBUG__
+import { stepTicksFor, judgeStepFor } from '../core/beatSnap.js';
+
 const MAX_LOG = 5000;
 
 const logs = { attack: [], beat: [], world: [], metronome: [] };
@@ -26,16 +28,20 @@ const copy = (arr) => arr.map((e) => ({ ...e }));
 export function installDebugHook(app) {
   appRef = app;
   const hook = {
-    version: 1,
+    version: 2,
     getState() {
       const c = app.conductor;
       const hasCtx = !!app.engine.ctx;
+      const stepTicks = stepTicksFor(app.settings.subdivision, c.bpm);
       const dur = app.song ? app.song.buffer.duration : 0;
       return {
         scene: app.scene,
         bpm: c.bpm,
         offsetMs: Math.round(c.offsetSec * 1000 * 1000) / 1000,
-        quantizeMode: app.settings.quantizeMode,
+        subdivision: app.settings.subdivision,
+        stepTicks,
+        judgeStepTicks: judgeStepFor(stepTicks),
+        fever: app.game ? app.game.fever.snapshot() : { value: 0, armed: false, active: false, endsAtBeat: null },
         lateGraceMs: app.settings.lateGraceMs,
         inputCalibrationMs: app.settings.inputCalibrationMs,
         songTime: hasCtx ? c.visualSongTime() : 0,
