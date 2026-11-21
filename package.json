@@ -1,0 +1,13 @@
+{
+  "name": "bpm-slash",
+  "version": "1.0.0",
+  "description": "BPM Slash - 拍點對齊的橫向卷軸節奏動作遊戲",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node tools/serve.mjs",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "generate:song": "node tools/generate-default-song.mjs",
+    "audit:rhythm": "node tools/rhythm-audit.mjs"
+  }
+}
