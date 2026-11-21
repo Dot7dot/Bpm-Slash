@@ -108,7 +108,8 @@
 - **聽覺域歌曲時間**（用於畫面、判定）：`heardSongTime(h) = h - beat0AudioTime`，其中 `h` 是 §5.1 的聽覺域 audio time（`heardAudioNow` 或由 `event.timeStamp` 換算出的聽覺域時間）。輸出延遲只在 §5.1 處理一次，絕不重複扣除。
 - **畫面時間** `visualSongTime = heardAudioNow - beat0AudioTime`。
 - **輸入時間** `inputSongTime = heardAudioTimeOf(event.timeStamp) - beat0AudioTime - inputCalibrationSec`（使用者「輸入延遲校正」，正值表示玩家習慣按晚，系統會把輸入往前修正）。
-- **物理限制**：排程只能排在 `ctx.currentTime` 之後，而 `currentTime` 比聽覺域超前約一個輸出延遲。若攻擊的 `expectedAudioTime < ctx.currentTime`（稍晚命中，或在拍點前不到一個輸出延遲才按下），音效只能立即播放；此時 log 記錄 `sfxClamped: true`，容許誤差為 `outputLatency + lateGraceSec`。
+- **物理限制**：排程只能排在 `ctx.currentTime` 之後，而 `currentTime` 比聽覺域超前約一個輸出延遲。若攻擊的 `expectedAudioTime < ctx.currentTime`（稍晚命中，或在拍點前不到一個輸出延遲才按下），音效只能立即播放；此時 log 記錄 `sfxClamped: true`，容許誤差為 `outputLatency + lateGraceSec`。這與 osu!、DDR 等節奏遊戲「按下即發聲」的業界做法相同。
+- **嚴格模式**（延遲容許 = 0）：保證攻擊音效 100% 落在網格上。量化時額外要求 `beat0AudioTime + slotSongTime >= ctx.currentTime + 0.005`，不滿足就往後找下一個可用 slot（等同把 `minSlotIndex` 提高）；因此嚴格模式下 `sfxClamped` 永遠為 `false`，代價是玩家必須提早按。判定仍以實際落點 slot 計算。
 
 ### 5.3 拍與小節
 - `beatFloat = songTime / beatDur`，`beatIndex = floor(beatFloat)`，`beatPhase = beatFloat - beatIndex`（0..1）。
@@ -215,7 +216,7 @@
 
 ### 9.1 主選單／設定
 - 歌曲來源：預設曲（88 BPM）或上傳檔案。`<input type="file" accept=".wav,.mp4,.m4a,audio/wav,audio/x-wav,audio/mp4,video/mp4">`。
-- 解碼：`ctx.decodeAudioData(arrayBuffer)`；失敗時顯示「無法解碼此檔案，請改用 WAV 或 AAC 編碼的 MP4」。（註：Playwright 內建的 Chromium 沒有 AAC 專利編碼，測試 MP4 時請用 Opus 或 FLAC 音軌的 MP4。）
+- 解碼：`ctx.decodeAudioData(arrayBuffer)`；失敗時顯示「無法解碼此檔案，請改用 WAV 或 AAC 編碼的 MP4」。（註：可行性審查實測，本環境的 Playwright Chromium 157 可解碼 AAC、Opus、FLAC 音軌的 MP4；較舊或開源版 Chromium 可能缺少 AAC，屆時改用 Opus／FLAC 測試。）
 - BPM：數字欄 + 滑桿（40–240，step 0.1，預設 88）；**Tap Tempo** 按鈕（平均最近 8 次間隔，超過 2 秒沒按就重置）；**自動偵測**按鈕（呼叫 `detectBpm`，顯示建議值，玩家按「套用」才生效）。
 - 第一拍偏移（ms，0–10000，附 ±10 ms 微調鈕）。
 - 輸入延遲校正（ms，−150 ~ +150）。
@@ -269,6 +270,7 @@
 5. 世界事件只在規格指定的拍點觸發（例如 `spike-up` 只會在 `beatInBar 3`、`spawn` 只會在 `beatInBar 0`）。
 6. 節拍器：`|scheduledAudioTime − expectedAudioTime| ≤ 1 ms`。
 7. 預設曲：鼓的 onset 與 88 BPM 網格平均誤差 ≤ 5 ms；偵測 BPM = 88 ± 0.5。
-8. 更改 BPM（例如 72.5、120、150）後以上條件仍成立。
+8. 更改 BPM（例如 40、72.5、120、150、240）與嚴格模式後以上條件仍成立；嚴格模式下 `sfxClamped` 必須永遠為 `false`。
+8b. **實際發聲驗證**：以 OfflineAudioContext 渲染各種攻擊音效與節拍器 click，量測的真實 onset 與排定時間差 ≤ 2 ms（避免音色的起音包絡造成聽感延遲）。log 另記錄排程當下的 `ctxNowAtSchedule`，非 clamped 的項目必須滿足 `scheduledAudioTime − ctxNowAtSchedule ≥ 0`。
 9. 無 console error；一般筆電可維持 60 fps。
 10. 全部文字只使用繁體中文或英文。
