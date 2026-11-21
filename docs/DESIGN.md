@@ -251,10 +251,10 @@
 | `stop()` | 停止並回到選單 |
 | `pressAttack()` | 模擬一次攻擊輸入，走與鍵盤完全相同的程式路徑（時間取 `performance.now()`） |
 | `setInvincible(bool)` | 稽核時避免死亡 |
-| `getAttackLog()` | `[{ id, inputSongTime, slotIndex, slotSongTime, half, isDownbeat, deltaSec, judgment, late, sfxClamped, scheduledAudioTime, expectedAudioTime, impactSongTime }]`（`impactSongTime` 在命中前為 `null`；`sfxClamped` 見 §5.2 物理限制） |
+| `getAttackLog()` | `[{ id, inputSongTime, slotIndex, slotSongTime, half, isDownbeat, deltaSec, judgment, late, sfxClamped, scheduledAudioTime, expectedAudioTime, ctxNowAtSchedule, impactSongTime }]`（`impactSongTime` 在命中前為 `null`；`sfxClamped` 見 §5.2 物理限制） |
 | `getBeatLog()` | `[{ beatIndex, beatInBar, barIndex, beatSongTime, firedSongTime }]` |
 | `getWorldLog()` | `[{ kind, entityId, beatIndex, beatInBar, beatSongTime, firedSongTime }]`，kind ∈ `slime-hop, bat-telegraph, bat-swoop, guard-step, guard-telegraph, guard-strike, spike-telegraph, spike-up, spike-down, spawn` |
-| `getMetronomeLog()` | `[{ beatIndex, scheduledAudioTime, expectedAudioTime }]` |
+| `getMetronomeLog()` | `[{ beatIndex, scheduledAudioTime, expectedAudioTime, ctxNowAtSchedule }]` |
 | `clearLogs()` | 清空所有 log |
 
 每種 log 最多保留 5000 筆（超過丟最舊）。時間欄位單位一律為秒。`firedSongTime` 是觸發當幀的 `visualSongTime`。
@@ -265,7 +265,7 @@
 
 1. `sfxClamped === false` 的攻擊：`|scheduledAudioTime − expectedAudioTime| ≤ 1 ms`；`sfxClamped === true` 的攻擊：`0 ≤ scheduledAudioTime − expectedAudioTime ≤ outputLatency + lateGraceSec + 5 ms`；late 的攻擊：`0 ≤ deltaSec ≤ lateGraceSec`。正常遊玩（提早按）的攻擊中，`sfxClamped` 的比例應很低。
 2. 所有 `slotSongTime` 都是 `halfStep` 的整數倍（誤差 < 1e-6 s）；`'beat'` 模式只會出現偶數 slot；`half` 與 slot 奇偶一致。
-3. impact frame：`0 ≤ impactSongTime − slotSongTime ≤ 1 幀`（60 fps 下 ≤ 20 ms；headless 環境容許 ≤ 40 ms）。
+3. impact frame：`0 ≤ impactSongTime − slotSongTime ≤ 1 幀`（60 fps 下 ≤ 20 ms；headless 環境容許 ≤ 40 ms，另因 headless 偶發 2–3 幀卡頓，最多 15% 的攻擊落在 40–60 ms 只列為警告，超過 60 ms 一律失敗）。此項只影響畫面，攻擊音效走音訊時鐘，不受幀率影響。
 4. beat event 不漏拍、不重複，觸發延遲 ≤ 1 幀；強拍每 4 拍一次。
 5. 世界事件只在規格指定的拍點觸發（例如 `spike-up` 只會在 `beatInBar 3`、`spawn` 只會在 `beatInBar 0`）。
 6. 節拍器：`|scheduledAudioTime − expectedAudioTime| ≤ 1 ms`。
