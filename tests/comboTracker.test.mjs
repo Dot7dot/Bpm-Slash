@@ -199,3 +199,31 @@ test('fever arms at full, starts on the next downbeat for 8 beats, ends on a dow
   // a hit during armed state does not add
   const g = new FeverMeter(); g.value = 1; g.armed = true; g.onAttack('off'); assert.equal(g.value, 1);
 });
+
+test('v3: a unison partner on an already-registered tick never re-triggers combos or advances a fill run', () => {
+  const t = new ComboTracker();
+  const mk = (tick) => ({ tick, stepTicks: 2, judgment: 'perfect', level: levelOfTick(tick), half: halfOfLevel(levelOfTick(tick)) });
+  // finisher bar: beats 0, 8, 16, 24 with a snare partner on 24 -> only one finisher
+  for (const k of [0, 8, 16]) t.registerAttack(mk(k), { instrument: 'kick' });
+  const a = t.registerAttack(mk(24), { instrument: 'kick' });
+  const b = t.registerAttack(mk(24), { instrument: 'snare' });
+  assert.equal(a.combo, 'bar');
+  assert.equal(b.combo, null);
+  assert.equal(t.finishers, 1);
+  assert.equal(t.kicks, 4);
+  assert.equal(t.snares, 1);
+  t.onUnison();
+  assert.equal(t.unisons, 1);
+  const before = t.score;
+  assert.equal(t.onGroove({ id: 'rock', score: 500 }), 500);
+  assert.equal(t.score, before + 500);
+  assert.equal(t.grooves, 1);
+});
+
+test('v3: groove fever bonus uses addBonus and respects the armed cap', () => {
+  const f = new FeverMeter();
+  f.addBonus(0.15);
+  assert.ok(Math.abs(f.value - 0.15) < 1e-9);
+  f.addBonus(5);
+  assert.equal(f.armed, true);
+});

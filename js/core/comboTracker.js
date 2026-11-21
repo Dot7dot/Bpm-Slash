@@ -33,6 +33,11 @@ export class ComboTracker {
     this.finishers = 0; // bar finishers (小節終結)
     this.fills = 0; // fill hits (過門重擊)
     this.parries = 0;
+    this.unisons = 0;
+    this.grooves = 0;
+    this.groovePatterns = {};
+    this.kicks = 0;
+    this.snares = 0;
   }
 
   /** Does attacking tick s complete an eighth combo (k, k+4, k+8, k+12 with k mod 8 == 0)? */
@@ -58,25 +63,29 @@ export class ComboTracker {
    * @param {{fever?: boolean}} [opt]
    * @returns {{combo:null|'eighth'|'bar'|'fill', eighth:boolean, finisher:boolean, fill:boolean, chain:number, scoreGain:number}}
    */
-  registerAttack(q, { fever = false } = {}) {
+  registerAttack(q, { fever = false, instrument = 'kick' } = {}) {
     const s = q.tick;
+    // v3: a second instrument landing on an already-registered tick (unison partner) never re-triggers or
+    // advances any tick-based combo; it only counts for judgment, chain and score.
+    const partner = this.ticks.has(s);
     // Run of attacks exactly S ticks apart (fill detection).
-    if (this.run > 0 && s - this.lastTick === q.stepTicks && this.runStep === q.stepTicks) this.run++;
+    if (partner) { /* run unchanged */ } else if (this.run > 0 && s - this.lastTick === q.stepTicks && this.runStep === q.stepTicks) this.run++;
     else { this.run = 1; this.runStep = q.stepTicks; }
-    this.lastTick = s;
+    if (!partner) this.lastTick = s;
 
     this.ticks.add(s);
     for (const v of this.ticks) if (v < s - 40) this.ticks.delete(v);
 
-    const bar = this._isFinisher(s);
-    const fill = !bar && this.run >= FILL_MIN_RUN && mod(s, 32) === 0;
-    const eighth = !bar && !fill && this._isEighth(s);
+    const bar = !partner && this._isFinisher(s);
+    const fill = !partner && !bar && this.run >= FILL_MIN_RUN && mod(s, 32) === 0;
+    const eighth = !partner && !bar && !fill && this._isEighth(s);
     let combo = null;
     if (bar) { combo = 'bar'; this.finishers++; }
     else if (fill) { combo = 'fill'; this.fills++; this.run = 0; }
     else if (eighth) { combo = 'eighth'; this.lastEighthTick = s; this.eighthCombos++; }
 
     this.attacks++;
+    if (instrument === 'snare') this.snares++; else this.kicks++;
     this.judgments[q.judgment]++;
     if (q.level === 'bar') this.halves.downbeat++;
     else if (q.half === 'front') this.halves.front++;
@@ -95,6 +104,14 @@ export class ComboTracker {
 
   addScore(n) { this.score += n; }
   onParry() { this.parries++; this.score += PARRY_BONUS; return PARRY_BONUS; }
+  /** Groove bonus (docs/DESIGN-DRUMMER.md section 4); g = evaluateGroove result. */
+  onGroove(g) {
+    this.grooves++;
+    this.groovePatterns[g.id] = (this.groovePatterns[g.id] || 0) + 1;
+    this.score += g.score;
+    return g.score;
+  }
+  onUnison() { this.unisons++; }
   onHurt() { this.chain = 0; }
 
   /** S/A/B/C rating. */
@@ -142,6 +159,8 @@ export class FeverMeter {
     if (combo) this._add(FEVER_GAIN.combo);
   }
   onParry() { this._add(FEVER_GAIN.parry); }
+  /** Flat gauge bonus (groove). */
+  addBonus(d) { this._add(d); }
   onHurt(songTime) { this._hurtUntil = songTime + FEVER_HURT_WINDOW; }
 
   /** Per-frame: decay by the song-time delta (never by frame count). */

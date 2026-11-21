@@ -2,7 +2,7 @@
 import { mulberry32 } from '../core/rng.js';
 import { pulseAt, beatInfoAt } from '../core/beatMath.js';
 import { TILE, H, W } from './constants.js';
-import { bindStage, stageInfo, patternFor, tileLit, tileColor } from './disco.js';
+import { stage, bindStage, stageInfo, patternFor, tileLit, tileColor } from './disco.js';
 
 const CHUNK_W = TILE * 16;
 
@@ -83,7 +83,15 @@ export class Level {
     const delay = Math.abs(i - centerTile) * 0.012;
     const b = beatInfoAt(vst - delay, bpm);
     const edge = pulseAt(b.beatPhase, b.beatInBar);
-    return { lift: edge * 9, glow: edge, down: b.beatInBar === 0 };
+    // kick drum thump: a ripple of extra lift travelling outward from the player's feet (animated from song time)
+    let thump = 0;
+    const g = stage.game;
+    const k = g && g.effects && g.effects.lastKick;
+    if (k && g.player) {
+      const age = vst - k.vst - Math.abs(i - Math.floor(g.player.x / TILE)) * 0.018;
+      if (age >= 0 && age < 0.5) thump = Math.exp(-age * 9) * 8 * (k.weight || 1) * (g.settings && g.settings.reduceFlashing ? 0.5 : 1);
+    }
+    return { lift: edge * 9 + thump, glow: Math.min(1, edge + thump / 8), down: b.beatInBar === 0 };
   }
 
   draw(ctx, cam, vst, bpm) {

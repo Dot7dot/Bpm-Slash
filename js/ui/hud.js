@@ -2,27 +2,65 @@
 import { W, H, FONT, COLORS } from '../game/constants.js';
 import { beatInfoAt, pulseAt, formatBarBeat } from '../core/beatMath.js';
 import { chainMultiplier } from '../core/comboTracker.js';
-import { LEVEL_NAMES, LEVEL_COLORS, COMBO_NAMES } from '../game/disco.js';
+import { LEVEL_COLORS } from '../game/disco.js';
+import { roundRectPath } from '../game/effects.js';
 
-const JUDGE_WORD = { perfect: 'PERFECT', great: 'GREAT', good: 'GOOD', off: 'OFF', auto: 'AUTO' };
-const JUDGE_COL = { perfect: '#ffe45e', great: '#5cf2ff', good: '#7dff9a', off: '#a6a1c4', auto: '#a6a1c4' };
 const LEVEL_W = { bar: 5, half: 4, beat: 3, eighth: 2, sixteenth: 1, thirtysecond: 0 };
-let lastJudge = null; // { id, vst, ... } newest attack seen in the queue (for the readout panel)
+const INSTR = {
+  snare: { name: '小鼓', color: '#8ff3ff' },
+  kick: { name: '大鼓', color: '#ff9a3d' },
+};
+const NOTE_R = { bar: 11, half: 10, beat: 9, eighth: 7.5, sixteenth: 6, thirtysecond: 5 };
+/** Ghost target patterns (tick within the bar -> instrument). Rock beat on most bars, four on the floor every 4th. */
+const GHOSTS = {
+  rock: { name: '搖滾節奏', kick: [0, 16], snare: [8, 24] },
+  four: { name: '四拍大鼓', kick: [0, 8, 16, 24], snare: [] },
+};
+let hist = []; // drum-score history: { id, key, tick, instr, level, judgment, state, impactVst }
+let histLast = -1e9;
+
+const instrOf = (a) => (a && (a.instrument || (a.q && a.q.instrument))) === 'snare' ? 'snare' : 'kick';
+const levelOfTick = (m) => (m === 0 ? 'bar' : m % 16 === 0 ? 'half' : m % 8 === 0 ? 'beat' : m % 4 === 0 ? 'eighth' : m % 2 === 0 ? 'sixteenth' : 'thirtysecond');
+
+/** Merge the live queue (and combat.hits when Drummer exposes it) into a short history of drum hits. */
+function collectHits(game, vst, tickDur) {
+  if (vst < histLast - 1) hist = [];
+  histLast = vst;
+  const upsert = (rec) => {
+    let h = hist.find((x) => x.key === rec.key);
+    if (!h && rec.tick !== undefined) h = hist.find((x) => x.tick === rec.tick && x.instr === rec.instr);
+    if (!h) { hist.push(rec); return; }
+    if (rec.state === 'impact' && h.state !== 'impact') { h.state = 'impact'; h.impactVst = rec.impactVst ?? vst; }
+    h.level = rec.level || h.level; h.judgment = rec.judgment || h.judgment;
+  };
+  const c = game.combat;
+  const queue = (c && c.queue) || [];
+  for (const a of queue) {
+    if (a.state === 'cancelled') continue;
+    const tick = Number.isFinite(a.tick) ? a.tick : Math.round((a.connectSongTime ?? 0) / tickDur);
+    const ai = attackInfo(a);
+    upsert({
+      key: `q${a.id}`, tick, instr: instrOf(a), level: a.level || levelOfTick(((tick % 32) + 32) % 32), judgment: ai.judgment,
+      state: a.state === 'pending' ? 'pending' : 'impact', impactVst: a.impactSongTime ?? undefined,
+    });
+  }
+  if (c && Array.isArray(c.hits)) {
+    for (const h of c.hits) {
+      if (!Number.isFinite(h.tick)) continue;
+      upsert({ key: `h${h.tick}${instrOf(h)}`, tick: h.tick, instr: instrOf(h), level: h.level || levelOfTick(((h.tick % 32) + 32) % 32), judgment: h.judgment || 'good', state: 'impact', impactVst: undefined });
+    }
+  }
+  // a pending entry whose queue record vanished (cancelled) is dropped; old bars pruned
+  const curBar = Math.floor(vst / tickDur / 32);
+  hist = hist.filter((h) => h.tick >= (curBar - 1) * 32 && (h.state === 'impact' || queue.some((a) => `q${a.id}` === h.key)));
+}
 
 /** Normalise an attack queue entry (v2 fields, with v1 fallbacks). */
 function attackInfo(a) {
   const q = a.q || {};
   const level = a.level || (q.isDownbeat ? 'bar' : q.half === 'front' ? 'beat' : q.half === 'back' ? 'eighth' : 'beat');
   const judgment = a.judgment || q.judgment || 'good';
-  let combo = a.combo && typeof a.combo === 'string' ? a.combo : null;
-  if (!combo && a.combo && typeof a.combo === 'object') combo = a.combo.finisher ? 'bar' : a.combo.eighth ? 'eighth' : null;
-  if (!combo && a.kind === 'finisher') combo = 'bar';
-  if (!combo && a.kind === 'combo8') combo = 'eighth';
-  if (!combo && a.kind === 'fill') combo = 'fill';
-  return {
-    id: a.id, level, judgment, onBeat: a.onBeat ?? (judgment === 'perfect' || judgment === 'great'),
-    combo, t: a.connectSongTime ?? a.slotSongTime ?? 0, parry: !!a.parry,
-  };
+  return { id: a.id, level, judgment, t: a.connectSongTime ?? a.slotSongTime ?? 0 };
 }
 
 /** Connect-grid step in ticks (spec 3.1) when the game does not expose it. */
@@ -56,28 +94,173 @@ function drawSwordIcon(ctx, x, y, color) {
   ctx.restore();
 }
 
+let SC = 1; // HUD text scale: grows on small (phone) canvases so text stays legible
 function text(ctx, str, x, y, { size = 16, color = COLORS.ink, align = 'left', weight = 700, stroke = true } = {}) {
-  ctx.font = `${weight} ${size}px ${FONT}`;
+  ctx.font = `${weight} ${Math.round(size * SC)}px ${FONT}`;
   ctx.textAlign = align;
   if (stroke) { ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(8,2,28,0.85)'; ctx.lineJoin = 'round'; ctx.strokeText(str, x, y); }
   ctx.fillStyle = color;
   ctx.fillText(str, x, y);
 }
 
+function drawNote(ctx, x, y, r, instr, fill, hollow, alpha, judgment, pop = 1) {
+  const rr = r * pop;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.lineJoin = 'round';
+  const path = () => {
+    ctx.beginPath();
+    if (instr === 'kick') ctx.arc(x, y, rr, 0, Math.PI * 2);
+    else { ctx.moveTo(x, y - rr * 1.2); ctx.lineTo(x + rr * 1.2, y); ctx.lineTo(x, y + rr * 1.2); ctx.lineTo(x - rr * 1.2, y); ctx.closePath(); }
+  };
+  if (!hollow && (judgment === 'perfect' || judgment === 'great')) {
+    ctx.shadowColor = judgment === 'perfect' ? '#ffe45e' : '#5cf2ff'; ctx.shadowBlur = 12;
+  }
+  path();
+  if (hollow) {
+    ctx.fillStyle = 'rgba(8,2,28,0.55)'; ctx.fill();
+    ctx.strokeStyle = fill; ctx.lineWidth = 2.5; ctx.stroke();
+  } else {
+    ctx.fillStyle = fill; ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = judgment === 'perfect' ? '#ffe45e' : judgment === 'great' ? '#5cf2ff' : 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = judgment === 'perfect' || judgment === 'great' ? 2.5 : 1.5; ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** Two-lane drum score (DESIGN-DRUMMER section 5): top SNARE, bottom KICK, one bar plus a 4-tick overhang. */
+function drawDrumScore(ctx, game, cond, vst, b, pulse, cs) {
+  const bd = cond.beatDur;
+  const tickDur = bd / 8;
+  const phone = cs < 0.7;
+  const k = Math.min(1.25, SC);
+  const panelW = phone ? 920 : 680;
+  const px0 = (W - panelW) / 2;
+  const labelW = 58 * (phone ? 1.15 : 1);
+  const headH = 20 * k, laneH = 36 * k;
+  const ph = headH + laneH * 2 + 8;
+  const top = H - 10 - ph;
+  const nx0 = px0 + labelW + 6, nx1 = px0 + panelW - 14;
+  const OVER = 4;
+  const ppt = (nx1 - nx0) / (32 + OVER);
+  const tf = vst / tickDur;
+  const bar0 = Math.floor(tf / 32);
+  const base = bar0 * 32;
+  const xOf = (tick) => nx0 + (tick - base) * ppt;
+  const laneY = { snare: top + headH + laneH * 0.5, kick: top + headH + laneH * 1.5 };
+
+  collectHits(game, vst, tickDur);
+
+  // panel
+  ctx.fillStyle = 'rgba(8,2,28,0.62)';
+  ctx.beginPath(); roundRectPath(ctx, px0, top, panelW, ph, 12); ctx.fill();
+  ctx.strokeStyle = 'rgba(160,120,255,0.4)'; ctx.lineWidth = 1.5; ctx.stroke();
+  // lane bands
+  for (const [name, y] of Object.entries(laneY)) {
+    ctx.fillStyle = name === 'snare' ? 'rgba(143,243,255,0.07)' : 'rgba(255,154,61,0.09)';
+    ctx.fillRect(nx0 - 4, y - laneH / 2 + 2, nx1 - nx0 + 8, laneH - 4);
+    text(ctx, INSTR[name].name, px0 + 10, y + 6 * k, { size: 16, color: INSTR[name].color, weight: 900 });
+  }
+  // overhang (next bar) shading
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  ctx.fillRect(xOf(base + 32), top + headH, OVER * ppt + 6, laneH * 2);
+
+  // grid
+  const step = stepTicksOf(game, bd);
+  const gTop = top + headH - 2, gBot = top + headH + laneH * 2 + 2;
+  for (let t = 0; t <= 32 + OVER; t += step) {
+    const m = t % 32;
+    const x = xOf(base + t);
+    let a = 0.16, w = 1, col = '255,255,255', ext = 0;
+    if (m === 0) { a = 0.85; w = 3; col = '255,210,77'; ext = 4; }
+    else if (m % 8 === 0) { a = 0.5; w = 2; col = '77,243,255'; }
+    else if (m % 4 === 0) { a = 0.3; w = 1.5; col = '255,79,216'; }
+    ctx.strokeStyle = `rgba(${col},${a})`; ctx.lineWidth = w;
+    ctx.beginPath(); ctx.moveTo(x, gTop - ext); ctx.lineTo(x, gBot); ctx.stroke();
+  }
+  // beat numbers in the header
+  for (let n = 0; n < 4; n++) {
+    const x = xOf(base + n * 8);
+    const active = Math.floor((tf - base) / 8) === n;
+    text(ctx, String(n + 1), x + 4, top + headH - 4, { size: 13, color: n === 0 ? COLORS.down : active ? '#ffffff' : '#b9a7ff', weight: 800, stroke: true });
+  }
+
+  // ghost target notes
+  const ghostOn = !(game.settings && game.settings.drumGhost === false);
+  const gh = ((bar0 % 4) + 4) % 4 === 3 ? GHOSTS.four : GHOSTS.rock;
+  if (ghostOn && b.beatIndex >= -1) {
+    const cur = hist.filter((h) => h.tick >= base && h.tick < base + 32 + OVER);
+    for (const inst of ['snare', 'kick']) {
+      for (const m of gh[inst]) {
+        if (cur.some((h) => h.instr === inst && h.tick === base + m)) continue;
+        const x = xOf(base + m), y = laneY[inst];
+        ctx.save();
+        ctx.setLineDash([3, 3]); ctx.lineWidth = 1.8; ctx.strokeStyle = INSTR[inst].color; ctx.globalAlpha = 0.4;
+        ctx.beginPath();
+        if (inst === 'kick') ctx.arc(x, y, 9 * k, 0, Math.PI * 2);
+        else { const r = 9 * k * 1.2; ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.closePath(); }
+        ctx.stroke(); ctx.restore();
+      }
+    }
+    text(ctx, `目標：${gh.name}`, nx0, top - 6, { size: 13, color: '#d9ccff', weight: 700 });
+  }
+
+  // played + queued hits
+  const items = hist.filter((h) => h.tick >= base && h.tick < base + 32 + OVER);
+  // unison connectors
+  for (const h of items) {
+    if (h.instr !== 'kick') continue;
+    if (items.some((o) => o.instr === 'snare' && o.tick === h.tick)) {
+      const x = xOf(h.tick);
+      ctx.strokeStyle = 'rgba(255,228,94,0.9)'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(x, laneY.snare); ctx.lineTo(x, laneY.kick); ctx.stroke();
+    }
+  }
+  for (const h of items) {
+    const x = xOf(h.tick), y = laneY[h.instr];
+    const r = (NOTE_R[h.level] || 7) * k;
+    const col = LEVEL_COLORS[h.level] || '#fff';
+    if (h.state === 'pending') {
+      const near = Math.max(0, 1 - (h.tick * tickDur - vst) / bd);
+      drawNote(ctx, x, y, r, h.instr, col, true, 0.65 + 0.35 * near, h.judgment);
+    } else {
+      const age = h.impactVst === undefined ? 1 : Math.max(0, vst - h.impactVst);
+      const pop = 1 + 0.6 * Math.exp(-age * 14);
+      drawNote(ctx, x, y, r, h.instr, col, false, h.judgment === 'off' ? 0.4 : 1, h.judgment, pop);
+    }
+  }
+
+  // playhead
+  const phx = Math.min(nx1 + 8, Math.max(nx0, xOf(tf)));
+  ctx.save();
+  ctx.strokeStyle = '#ffffff'; ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 8 + 10 * pulse; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(phx, top + 4); ctx.lineTo(phx, gBot + 2); ctx.stroke();
+  const ringCol = b.beatInBar === 0 ? COLORS.down : COLORS.front;
+  ctx.strokeStyle = ringCol; ctx.shadowColor = ringCol; ctx.lineWidth = 3 + 2 * pulse;
+  ctx.beginPath(); ctx.arc(phx, top + 4, 5 + 4 * pulse, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+
 export function drawHud(ctx, game, cond, vst, scene, song) {
   const bpm = cond.bpm;
   const bd = cond.beatDur;
-  const hs = cond.halfStep;
   const b = beatInfoAt(vst, bpm);
   const pulse = pulseAt(b.beatPhase, b.beatInBar);
+  const cw = ctx.canvas && ctx.canvas.clientWidth;
+  const cs = cw ? Math.max(0.2, Math.min(1.5, cw / W)) : 1;
+  SC = Math.min(1.6, Math.max(1, 0.66 / cs));
+  const s1 = Math.min(1.35, SC);
 
   ctx.save();
 
-  // ---- top-left: hearts / score / chain ----
+  // ---- top-left: hearts / score / chain / fever meter ----
   const p = game.player;
+  const hr = 11 * s1;
+  let y = 12 + hr * 1.4;
   for (let i = 0; i < p.maxHp; i++) {
-    const x = 28 + i * 30;
-    heartPath(ctx, x, 30, 11);
+    const x = 18 + hr + i * (hr * 2.7);
+    heartPath(ctx, x, y, hr);
     if (i < p.hp) {
       ctx.fillStyle = '#ff4d8d'; ctx.shadowColor = '#ff4d8d'; ctx.shadowBlur = 10 + 8 * pulse; ctx.fill();
     } else {
@@ -86,37 +269,41 @@ export function drawHud(ctx, game, cond, vst, scene, song) {
   }
   ctx.shadowBlur = 0;
   const combo = game.combo;
-  text(ctx, String(Math.floor(combo.score)).padStart(7, '0'), 16, 74, { size: 26, color: '#ffffff', weight: 800 });
-  text(ctx, 'SCORE', 16, 92, { size: 11, color: '#b9a7ff', weight: 700 });
+  y += 14 + 26 * SC;
+  text(ctx, String(Math.floor(combo.score)).padStart(7, '0'), 16, y, { size: 26, color: '#ffffff', weight: 800 });
+  y += 17 * SC;
+  text(ctx, 'SCORE', 16, y, { size: 13, color: '#b9a7ff', weight: 700 });
   if (combo.chain > 0) {
+    y += 30 * SC;
     const k = 1 + 0.18 * game.hudPulse;
-    ctx.save(); ctx.translate(16, 122); ctx.scale(k, k);
+    ctx.save(); ctx.translate(16, y); ctx.scale(k, k);
     text(ctx, `CHAIN ${combo.chain}`, 0, 0, { size: 22, color: combo.chain >= 10 ? COLORS.down : COLORS.great, weight: 800 });
     ctx.restore();
-    text(ctx, `×${chainMultiplier(combo.chain).toFixed(1)}`, 16, 142, { size: 13, color: '#b9a7ff' });
+    y += 19 * SC;
+    text(ctx, `×${chainMultiplier(combo.chain).toFixed(1)}`, 16, y, { size: 14, color: '#b9a7ff' });
   }
 
-  // ---- fever meter (below chain) ----
   const fv = game.fever || { value: 0, armed: false, active: false, endsAtBeat: 0 };
   {
-    const fx = 16, fy = combo.chain > 0 ? 154 : 108, fw = 150, fh = 10;
-    ctx.fillStyle = 'rgba(8,2,28,0.6)'; ctx.beginPath(); ctx.roundRect(fx - 2, fy - 2, fw + 4, fh + 4, 6); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.beginPath(); ctx.roundRect(fx, fy, fw, fh, 4); ctx.fill();
+    const fx = 16, fy = y + 14, fw = 150, fh = 10 * s1;
+    ctx.fillStyle = 'rgba(8,2,28,0.6)'; ctx.beginPath(); roundRectPath(ctx, fx - 2, fy - 2, fw + 4, fh + 4, 6); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.beginPath(); roundRectPath(ctx, fx, fy, fw, fh, 4); ctx.fill();
     const v = Math.min(1, Math.max(0, fv.value || 0));
     if (v > 0.002 || fv.active) {
       const g2 = ctx.createLinearGradient(fx, 0, fx + fw, 0);
       if (fv.active) { for (let i = 0; i <= 4; i++) g2.addColorStop(i / 4, rainbow(vst, i * 60)); }
       else { g2.addColorStop(0, '#4df3ff'); g2.addColorStop(0.6, '#ff4fd8'); g2.addColorStop(1, '#ffd24d'); }
       ctx.fillStyle = g2; ctx.shadowColor = fv.armed || fv.active ? '#ffd24d' : '#ff4fd8'; ctx.shadowBlur = fv.armed || fv.active ? 12 + 8 * pulse : 5;
-      ctx.beginPath(); ctx.roundRect(fx, fy, Math.max(6, fw * (fv.active ? 1 : v)), fh, 4); ctx.fill();
+      ctx.beginPath(); roundRectPath(ctx, fx, fy, Math.max(6, fw * (fv.active ? 1 : v)), fh, 4); ctx.fill();
       ctx.shadowBlur = 0;
     }
-    text(ctx, 'FEVER', fx, fy + 26, { size: 11, color: fv.active || fv.armed ? '#ffd24d' : '#b9a7ff', weight: 800 });
+    text(ctx, 'FEVER', fx, fy + fh + 16 * SC, { size: 13, color: fv.active || fv.armed ? '#ffd24d' : '#b9a7ff', weight: 800 });
   }
+  const bannerY = 136 + (s1 - 1) * 40;
   if (fv.active) {
     const left = Math.max(0, (fv.endsAtBeat ?? 0) - b.beatFloat);
-    const k = 1 + 0.12 * pulse;
-    ctx.save(); ctx.translate(W / 2, 136); ctx.scale(k, k);
+    const k = (1 + 0.12 * pulse) * Math.min(1.3, s1);
+    ctx.save(); ctx.translate(W / 2, bannerY); ctx.scale(k, k);
     ctx.textAlign = 'center'; ctx.font = `900 34px ${FONT}`;
     ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(8,2,28,0.9)'; ctx.lineJoin = 'round';
     ctx.strokeText('FEVER ×2', 0, 0);
@@ -124,117 +311,34 @@ export function drawHud(ctx, game, cond, vst, scene, song) {
     ctx.fillText('FEVER ×2', 0, 0);
     ctx.restore();
     if (fv.endsAtBeat) {
-      const bw = 140; ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(W / 2 - bw / 2, 146, bw, 4);
-      ctx.fillStyle = rainbow(vst, 200); ctx.fillRect(W / 2 - bw / 2, 146, bw * Math.min(1, left / 8), 4);
+      const bw = 140; ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(W / 2 - bw / 2, bannerY + 10, bw, 4);
+      ctx.fillStyle = rainbow(vst, 200); ctx.fillRect(W / 2 - bw / 2, bannerY + 10, bw * Math.min(1, left / 8), 4);
     }
   } else if (fv.armed) {
     const blink = 0.55 + 0.45 * Math.sin(b.beatFloat * Math.PI * 2);
     ctx.save(); ctx.globalAlpha = blink;
-    text(ctx, 'FEVER 待命', W / 2, 130, { size: 26, color: '#ffd24d', align: 'center', weight: 900 });
-    text(ctx, '下一小節開始', W / 2, 150, { size: 13, color: '#ffe9a8', align: 'center', weight: 700 });
+    text(ctx, 'FEVER 待命', W / 2, bannerY - 6, { size: 26, color: '#ffd24d', align: 'center', weight: 900 });
+    text(ctx, '下一小節開始', W / 2, bannerY + 16 * SC, { size: 14, color: '#ffe9a8', align: 'center', weight: 700 });
     ctx.restore();
   }
 
   // ---- top-right: BPM, bar:beat, song, progress ----
   const bb = formatBarBeat(b.beatIndex);
-  text(ctx, `${bpm % 1 === 0 ? bpm : bpm.toFixed(1)} BPM`, W - 16, 30, { size: 22, color: COLORS.front, align: 'right', weight: 800 });
-  text(ctx, bb.countIn ? '預備' : `小節 ${bb.bar} : ${bb.beat}`, W - 16, 54, { size: 18, color: '#ffffff', align: 'right' });
-  text(ctx, song || '', W - 16, 76, { size: 12, color: '#b9a7ff', align: 'right', weight: 600 });
-  const pw = 220, px = W - 16 - pw, py = 86;
+  let ry = 12 + 22 * SC;
+  text(ctx, `${bpm % 1 === 0 ? bpm : bpm.toFixed(1)} BPM`, W - 16, ry, { size: 22, color: COLORS.front, align: 'right', weight: 800 });
+  ry += 24 * SC;
+  text(ctx, bb.countIn ? '預備' : `小節 ${bb.bar} : ${bb.beat}`, W - 16, ry, { size: 18, color: '#ffffff', align: 'right' });
+  ry += 20 * SC;
+  text(ctx, song || '', W - 16, ry, { size: 13, color: '#b9a7ff', align: 'right', weight: 600 });
+  const pw = 220, px = W - 16 - pw, py = ry + 10;
   const prog = Math.min(1, Math.max(0, (vst) / Math.max(1, game.endSongTime)));
   ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(px, py, pw, 5);
   const pg = ctx.createLinearGradient(px, 0, px + pw, 0);
   pg.addColorStop(0, COLORS.front); pg.addColorStop(1, COLORS.back);
   ctx.fillStyle = pg; ctx.fillRect(px, py, pw * prog, 5);
 
-  // ---- beat track ----
-  const cx = W / 2, cy = H - 56, half = 270;
-  ctx.fillStyle = 'rgba(8,2,28,0.55)';
-  ctx.beginPath(); ctx.roundRect(cx - half - 24, cy - 40, (half + 24) * 2, 80, 14); ctx.fill();
-  ctx.strokeStyle = 'rgba(160,120,255,0.35)'; ctx.lineWidth = 1.5; ctx.stroke();
-  ctx.strokeStyle = 'rgba(160,120,255,0.3)';
-  ctx.beginPath(); ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy); ctx.stroke();
-
-  const span = 2 * bd;
-  const tickDur = bd / 8;
-  const step = stepTicksOf(game, bd);
-  const kmin = Math.ceil((vst - 0.1) / tickDur / step) * step;
-  const kmax = Math.floor((vst + span) / tickDur);
-  for (let k = kmin; k <= kmax; k += step) {
-    const delta = k * tickDur - vst;
-    const off = (delta / span) * half;
-    const m = ((k % 32) + 32) % 32;
-    const lv = m === 0 ? 'bar' : m % 16 === 0 ? 'half' : m % 8 === 0 ? 'beat' : m % 4 === 0 ? 'eighth' : m % 2 === 0 ? 'sixteenth' : 'thirtysecond';
-    const w5 = LEVEL_W[lv];
-    const h = [8, 11, 15, 26, 36, 46][w5], w = [2, 2, 3, 4, 6, 8][w5];
-    const color = lv === 'bar' ? COLORS.down : w5 >= 3 ? COLORS.front : lv === 'eighth' ? COLORS.back : '#8f86b8';
-    let alpha = Math.min(1, (span - delta) / 0.3);
-    if (delta < 0) alpha *= Math.max(0, 1 + delta / 0.1);
-    alpha *= Math.min(1, Math.max(0, (Math.abs(off) - 16) / 22)); // fade out under the centre ring
-    if (w5 < 2) alpha *= 0.7;
-    ctx.globalAlpha = Math.max(0, alpha);
-    ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = w5 >= 4 ? 14 : w5 >= 2 ? 8 : 0;
-    for (const sgn of [-1, 1]) ctx.fillRect(cx + sgn * off - w / 2, cy - h / 2, w, h);
-  }
-  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
-
-  // queued attacks at their exact connect time (sword icon + line down to the track)
-  const queue = (game.combat && game.combat.queue) || [];
-  for (const a of queue) {
-    if (a.state !== 'pending') continue;
-    const ai = attackInfo(a);
-    const delta = ai.t - vst;
-    if (delta > span) continue;
-    const off = (delta / span) * half;
-    const col = LEVEL_COLORS[ai.level] || COLORS.front;
-    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.globalAlpha = 0.7;
-    for (const sgn of [-1, 1]) {
-      ctx.beginPath(); ctx.moveTo(cx + sgn * off, cy - 30); ctx.lineTo(cx + sgn * off, cy + 14); ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-    for (const sgn of [-1, 1]) drawSwordIcon(ctx, cx + sgn * off, cy - 38, col);
-  }
-
-  // centre ring
-  const ringR = 20 + 9 * pulse;
-  const ringCol = b.beatInBar === 0 ? COLORS.down : COLORS.front;
-  ctx.strokeStyle = ringCol; ctx.shadowColor = ringCol; ctx.shadowBlur = 12 + 14 * pulse;
-  ctx.lineWidth = 3 + 2 * pulse;
-  ctx.beginPath(); ctx.arc(cx, cy, ringR, 0, Math.PI * 2); ctx.stroke();
-  // half-beat ring (back beat) flicker
-  const halfPhase = (vst / hs) - Math.floor(vst / hs);
-  if (Math.floor(vst / hs) % 2 !== 0) {
-    ctx.strokeStyle = COLORS.back; ctx.shadowColor = COLORS.back; ctx.globalAlpha = Math.exp(-halfPhase * 6) * 0.8;
-    ctx.beginPath(); ctx.arc(cx, cy, 14 + 6 * Math.exp(-halfPhase * 6), 0, Math.PI * 2); ctx.stroke();
-    ctx.globalAlpha = 1;
-  }
-  ctx.shadowBlur = 0;
-  // legend
-  text(ctx, '正拍', cx - half - 6, cy + 34, { size: 11, color: COLORS.front, align: 'left', weight: 600, stroke: false });
-  text(ctx, '後拍', cx - half + 38, cy + 34, { size: 11, color: COLORS.back, align: 'left', weight: 600, stroke: false });
-  text(ctx, '強拍', cx - half + 82, cy + 34, { size: 11, color: COLORS.down, align: 'left', weight: 600, stroke: false });
-
-  // ---- judgment readout (bottom-left): row 1 準拍/離拍 + judgment, row 2 level name, row 3 combo name ----
-  for (const a of queue) {
-    if (a.state === 'cancelled') continue;
-    if (!lastJudge || a.id > lastJudge.id || vst < lastJudge.vst - 1) {
-      if (!lastJudge || a.id !== lastJudge.id) lastJudge = { ...attackInfo(a), vst };
-    }
-  }
-  if (lastJudge && vst - lastJudge.vst < 1.1) {
-    const k = (vst - lastJudge.vst) / 1.1;
-    const pop = 1 + 0.25 * Math.exp(-k * 14);
-    ctx.save(); ctx.globalAlpha = k > 0.7 ? 1 - (k - 0.7) / 0.3 : 1;
-    const jx = 16, jy = H - 84;
-    ctx.save(); ctx.translate(jx, jy); ctx.scale(pop, pop);
-    const jc = lastJudge.onBeat ? JUDGE_COL[lastJudge.judgment] : '#a6a1c4';
-    text(ctx, `${lastJudge.onBeat ? '準拍' : '離拍'} ${JUDGE_WORD[lastJudge.judgment] || ''}`, 0, 0, { size: 22, color: jc, weight: 900 });
-    ctx.restore();
-    text(ctx, LEVEL_NAMES[lastJudge.level] || '', jx, jy + 22, { size: 16, color: LEVEL_COLORS[lastJudge.level] || '#fff', weight: 800 });
-    if (lastJudge.parry) text(ctx, '招架', jx + 78, jy + 22, { size: 16, color: '#ffe45e', weight: 800 });
-    if (lastJudge.combo && COMBO_NAMES[lastJudge.combo]) text(ctx, COMBO_NAMES[lastJudge.combo], jx, jy + 44, { size: 16, color: '#ff9fe8', weight: 800 });
-    ctx.restore();
-  }
+  // ---- drum score ----
+  drawDrumScore(ctx, game, cond, vst, b, pulse, cs);
 
   // ---- count-in / GO ----
   if (scene === 'countin' || vst < bd * 1.2) {
@@ -251,7 +355,7 @@ export function drawHud(ctx, game, cond, vst, scene, song) {
       let row = '';
       for (let i = 1; i <= 4; i++) row += (i <= n ? '●' : '○') + ' ';
       text(ctx, row.trim(), W / 2, 318, { size: 22, color: '#ffffff', align: 'center' });
-      text(ctx, '← → 移動　J / K / 空白鍵 攻擊（對準節拍軌！）', W / 2, 352, { size: 15, color: '#b9a7ff', align: 'center' });
+      text(ctx, '你就是鼓手！J／空白鍵＝大鼓「咚」　K＝小鼓「啪」', W / 2, 352, { size: 15, color: '#b9a7ff', align: 'center' });
     } else if (vst >= 0 && vst < bd * 1.2) {
       const k = vst / (bd * 1.2);
       ctx.globalAlpha = 1 - k * k;

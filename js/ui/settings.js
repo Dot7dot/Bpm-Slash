@@ -7,7 +7,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   bpm: 88,
   offsetMs: 0,
   inputCalibrationMs: 0,
-  lateGraceMs: 40,
+  lateGraceMs: 25, // v3 F4 (was 40); a stored user value is kept
   subdivision: 'auto', // 'auto' | 1 | 2 | 4 | 8 (beat divisions: quarter / eighth / sixteenth / thirty-second)
   metronome: true,
   musicVol: 0.8,

@@ -136,7 +136,7 @@ class App {
       const mod = await import('./core/songMap.js');
       const r = mod.analyzeSongMap(mono, buf.sampleRate, { bpm: s.bpm, offsetSec: s.offsetMs / 1000, beatsPerBar: 4 });
       if (r && Array.isArray(r.sections) && r.sections.length) map = r;
-    } catch (e) { map = null; }
+    } catch (e) { console.warn('[songMap]', e); map = null; }
     song.map = map; song.mapKey = key;
     return map;
   }
@@ -269,9 +269,10 @@ class App {
     showResults(game, game.over.died);
   }
 
-  pressAttack(perfMs) {
+  /** instrument: 'kick' (J / Space / 咚) or 'snare' (K / 啪). One path for keyboard, touch and the debug hook. */
+  pressAttack(perfMs, instrument = 'kick') {
     if ((this.scene !== 'countin' && this.scene !== 'playing') || !this.game) return null;
-    return this.game.combat.pressAttack(perfMs);
+    return this.game.combat.pressAttack(perfMs, instrument);
   }
 
   // ---------- input ----------
@@ -287,7 +288,7 @@ class App {
       if (!inGame || isTyping(e)) return;
       if (e.code === 'Space' || e.code === 'KeyJ' || e.code === 'KeyK') {
         e.preventDefault();
-        if (!e.repeat) this.pressAttack(e.timeStamp);
+        if (!e.repeat) this.pressAttack(e.timeStamp, e.code === 'KeyK' ? 'snare' : 'kick');
       } else if (['ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD'].includes(e.code)) {
         e.preventDefault();
         this.keys.add(e.code);
@@ -315,10 +316,14 @@ class App {
     };
     hold('t-left', -1);
     hold('t-right', 1);
-    const atk = $('t-attack');
-    atk.addEventListener('pointerdown', (e) => { e.preventDefault(); atk.classList.add('down'); this.pressAttack(e.timeStamp); });
-    const atkUp = () => atk.classList.remove('down');
-    atk.addEventListener('pointerup', atkUp); atk.addEventListener('pointercancel', atkUp); atk.addEventListener('pointerleave', atkUp);
+    const drumBtn = (id, instrument) => {
+      const el = $(id);
+      el.addEventListener('pointerdown', (e) => { e.preventDefault(); el.classList.add('down'); this.pressAttack(e.timeStamp, instrument); });
+      const up = () => el.classList.remove('down');
+      el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); el.addEventListener('pointerleave', up);
+    };
+    drumBtn('t-kick', 'kick');
+    drumBtn('t-snare', 'snare');
     $('t-pause').addEventListener('click', () => this.pause());
     $('rotate-tip-close').addEventListener('click', () => document.body.classList.add('tip-dismissed'));
   }

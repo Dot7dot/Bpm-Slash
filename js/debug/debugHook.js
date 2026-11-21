@@ -28,7 +28,7 @@ const copy = (arr) => arr.map((e) => ({ ...e }));
 export function installDebugHook(app) {
   appRef = app;
   const hook = {
-    version: 2,
+    version: 3,
     getState() {
       const c = app.conductor;
       const hasCtx = !!app.engine.ctx;
@@ -58,7 +58,10 @@ export function installDebugHook(app) {
       await app.startGame({ ...opts, fromDebug: true });
     },
     stop() { app.stopToMenu(); },
-    pressAttack() { return app.pressAttack(performance.now()); },
+    /** instrument: 'kick' (default) | 'snare'. Attack log entries carry `instrument` and `unison`. */
+    pressAttack(instrument = 'kick') { return app.pressAttack(performance.now(), instrument === 'snare' ? 'snare' : 'kick'); },
+    /** The live Game (or null) so tests can inspect combat.barHits / combat.queued / combo etc. */
+    getGame() { return app.game || null; },
     setInvincible(v) { app.invincible = !!v; if (app.game) app.game.invincible = !!v; },
     getAttackLog() { return copy(logs.attack); },
     getBeatLog() { return copy(logs.beat); },

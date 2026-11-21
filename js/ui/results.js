@@ -18,6 +18,10 @@ export function showResults(game, died) {
   $('res-front').textContent = c.halves.front;
   $('res-back').textContent = c.halves.back + c.halves.sub;
   $('res-down').textContent = c.halves.downbeat;
+  $('res-kick').textContent = c.kicks;
+  $('res-snare').textContent = c.snares;
+  $('res-unison').textContent = c.unisons;
+  $('res-groove').textContent = c.grooves;
   $('res-kills').textContent = game.kills;
   $('results').classList.remove('hidden');
 }

@@ -17,7 +17,10 @@
       <button id="t-right" class="tbtn" type="button">▶</button>
     </div>
     <button id="t-pause" class="tbtn small" type="button">Ⅱ</button>
-    <button id="t-attack" class="tbtn attack" type="button">斬</button>
+    <div class="touch-group drums">
+      <button id="t-snare" class="tbtn attack snare" type="button" aria-label="小鼓">啪</button>
+      <button id="t-kick" class="tbtn attack kick" type="button" aria-label="大鼓">咚</button>
+    </div>
   </div>
 
   <!-- 直向提示（手機遊戲中）：不攔截觸控，僅 ✕ 可點 -->
@@ -31,7 +34,7 @@
     <div class="panel">
       <header class="title">
         <h1>BPM <span>SLASH</span></h1>
-        <p>拍點斬　揮劍的瞬間，永遠落在節拍上</p>
+        <p>拍點斬　你就是鼓手：每一次揮劍，都是這首歌的鼓聲</p>
       </header>
 
       <section class="card">
@@ -39,11 +42,12 @@
         <div class="row">
           <button id="btn-default-song" class="btn" type="button">使用預設曲（88 BPM）</button>
           <label class="btn file">
-            上傳 WAV / MP4
+            上傳去鼓伴奏 WAV / MP4
             <input id="file-input" type="file" accept=".wav,.mp4,.m4a,audio/wav,audio/x-wav,audio/mp4,video/mp4">
           </label>
         </div>
         <p id="song-status" class="status">載入中…</p>
+        <p class="hint">預設曲為去鼓伴奏。上傳自己的歌時，建議使用去鼓版（minus-drum / drumless backing track）。</p>
         <p id="song-msg" class="msg" role="status"></p>
       </section>
 
@@ -86,7 +90,7 @@
           </div>
           <div class="field">
             <label for="grace-num">延遲容許（ms，0 – 100）</label>
-            <input id="grace-num" type="number" min="0" max="100" step="1" value="40">
+            <input id="grace-num" type="number" min="0" max="100" step="1" value="25">
             <p class="hint">稍晚按下時仍算命中前一個拍點；0 即嚴格模式</p>
           </div>
         </div>
@@ -112,7 +116,23 @@
         </div>
       </section>
 
-      <p class="hint center">← → / A D 移動　J / K / 空白鍵 攻擊　Esc / P 暫停</p>
+      <section class="card" id="how-to">
+        <h2>玩法：你就是鼓手</h2>
+        <p class="hint strong">背景音樂是去鼓伴奏，你就是鼓手。鼓聲只來自你的攻擊，打出來的就是這首歌的鼓組。</p>
+        <ul class="help">
+          <li><b>大鼓「咚」</b>：<kbd>J</kbd> / <kbd>空白鍵</kbd> / 觸控「咚」。重擊（傷害 ×1.25、擊退大），會被盾兵正面擋下。</li>
+          <li><b>小鼓「啪」</b>：<kbd>K</kbd> / 觸控「啪」。快刺（傷害 ×0.8、距離 +20 px），可穿透盾牌。</li>
+          <li><b>齊奏</b>：兩鍵同時按下，落在同一格 → 兩擊都 ×1.5，加碎音鈸「齊奏!」。</li>
+          <li><b>鼓手節奏型（每小節強拍結算上一小節）</b>：
+            搖滾節奏＝大鼓在第 1、3 拍、小鼓在第 2、4 拍；
+            四拍大鼓＝大鼓連打四拍；
+            反拍＝小鼓只打第 2、4 拍。達成可獲得狂熱與額外分數。</li>
+          <li><b>招架</b>：敵人預警後，讓任一鼓的落點剛好在它出招的那一拍。</li>
+          <li>建議上傳<b>去鼓伴奏</b>（minus-drum / drumless backing track）以獲得最佳體驗；含鼓的歌曲也能玩，但鼓聲會互相打架。</li>
+        </ul>
+      </section>
+
+      <p class="hint center">← → / A D 移動　J / 空白鍵 = 大鼓「咚」　K = 小鼓「啪」　Esc / P 暫停</p>
 
       <!-- 底部操作列：捲動時仍固定可見 -->
       <footer class="action-bar">
@@ -146,6 +166,8 @@
           <tr><th>PERFECT</th><td id="res-perfect">0</td><th>GREAT</th><td id="res-great">0</td></tr>
           <tr><th>GOOD</th><td id="res-good">0</td><th>離拍 OFF</th><td id="res-auto">0</td></tr>
           <tr><th>前拍斬（含半小節）</th><td id="res-front">0</td><th>後拍刺（含碎拍）</th><td id="res-back">0</td></tr>
+          <tr><th>大鼓「咚」</th><td id="res-kick">0</td><th>小鼓「啪」</th><td id="res-snare">0</td></tr>
+          <tr><th>齊奏</th><td id="res-unison">0</td><th>節奏型 GROOVE</th><td id="res-groove">0</td></tr>
           <tr><th>強拍斬</th><td id="res-down">0</td><th>擊敗敵人</th><td id="res-kills">0</td></tr>
         </tbody>
       </table>

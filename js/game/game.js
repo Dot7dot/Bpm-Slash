@@ -41,11 +41,25 @@ export class Game {
   /** End-of-song time in song-time domain (file end). */
   get endSongTime() { return this.songDurationSec - this.conductor.offsetSec; }
 
-  logWorld(kind, entityId, ev) {
+  logWorld(kind, entityId, ev, extra = null) {
     pushLog('world', {
       kind, entityId, beatIndex: ev.beatIndex, beatInBar: ev.beatInBar,
       beatSongTime: ev.beatSongTime, firedSongTime: this.conductor.lastVisualSongTime,
+      ...(extra || {}),
     });
+  }
+
+  /** Drummer groove (docs/DESIGN-DRUMMER.md section 4): judge the bar that just ended, on the downbeat event. */
+  _checkGroove(ev) {
+    const bar = ev.barIndex - 1;
+    const gr = this.combat.evaluateBar(bar);
+    if (!gr) return;
+    this.combo.onGroove(gr);
+    this.fever.addBonus(gr.fever);
+    this.combat.lastGroove = { ...gr, barIndex: bar, songTime: ev.beatSongTime };
+    this.logWorld('groove', gr.id, ev, { pattern: gr.id, name: gr.name, nameEn: gr.nameEn, grooveBar: bar, score: gr.score, fever: gr.fever });
+    this.effects.text(this.player.x, this.player.y - 190, `GROOVE! ${gr.name}`, { color: COLORS.back, size: 34, life: 1.3, rise: 36, channel: 'groove' });
+    if (!this.settings.reduceFlashing) this.effects.flashScreen(0.25, '#ff4fd8', false);
   }
 
   onBeat(ev) {
@@ -55,19 +69,19 @@ export class Game {
     });
     const fv = this.fever.onBeat(ev);
     if (fv === 'start') {
-      this.logWorld('fever-start', null, ev);
-      this.effects.text(this.player.x, this.player.y - 190, 'FEVER ×2', { color: COLORS.down, size: 36, life: 1.2, rise: 40, channel: 'combo' });
+      this.logWorld('fever-start', null, ev); // the HUD shows the FEVER banner
     } else if (fv === 'end') {
       this.logWorld('fever-end', null, ev);
     }
     if (this.over) return;
+    if (ev.beatInBar === 0) this._checkGroove(ev);
     this.level.onBeat(ev, this, this.camera.x, this.camera.x + W);
     for (const e of this.enemies) e.onBeat(ev, this);
     if (ev.beatInBar === 0 && ev.barIndex >= 2) this._spawnWave(ev);
   }
 
   _spawnWave(ev) {
-    const types = waveFor(ev.barIndex);
+    const types = waveFor(ev.barIndex, this.intensityAtBar(ev.barIndex));
     let n = 0;
     for (const t of types) {
       if (this.enemies.length >= MAX_ENEMIES) break;
@@ -105,9 +119,9 @@ export class Game {
   /** A parry happened (called by an enemy's parry() or detected by Combat). Idempotent per attack. */
   onParry(e, attack) {
     if (!this.combat.markParried(attack)) return;
-    const gain = this.combo.onParry();
+    this.combo.onParry();
     this.fever.onParry();
-    this.effects.text(this.player.x, this.player.y - 150, `+${gain}`, { color: COLORS.perfect, size: 22, life: 0.8, rise: 30 });
+    if (typeof this.engine.playConfirmParry === 'function') this.engine.playConfirmParry();
   }
 
   damageEnemy(e, dmgIn, kbSigned, kind) {

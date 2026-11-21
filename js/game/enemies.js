@@ -4,8 +4,9 @@ import { beatInfoAt, pulseAt } from '../core/beatMath.js';
 import { hash01 } from '../core/rng.js';
 import { FONT, COLORS } from './constants.js';
 import { stage, intensityOf } from './disco.js';
+import { roundRectPath } from './effects.js';
 
-let parryHints = 0; // the 「出手招架」 hint is shown for the first few telegraphs only
+// the 「出手招架」 hint is shown for the first few telegraphs of each game (counter lives on the game object)
 const HINT_MAX = 4;
 
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -23,10 +24,34 @@ class Enemy {
     this.stunned = false; this.stunSince = 0; this.curEv = null; this.showHint = false; this.bd = 0.68;
   }
   /** Set the strike tick for the beat after the telegraph beat. */
-  armStrike(ev) {
+  armStrike(ev, g) {
     this.strikeTick = (ev.beatIndex + 1) * 8;
-    this.showHint = parryHints < HINT_MAX;
-    if (this.showHint) parryHints++;
+    if (g) {
+      g.parryHintCount ??= 0;
+      this.showHint = g.parryHintCount < HINT_MAX;
+      if (this.showHint) g.parryHintCount++;
+    }
+  }
+  /**
+   * Strike beat event: do not resolve yet. The strike resolves in update() at song time
+   * strikeTick * beatDur / 8 + lateGraceSec, so a press up to lateGrace after the beat (snapped onto the
+   * same tick by the late rule) can still parry. Keyed to song time, never to dt.
+   */
+  beginStrike(g, ev, onHit) {
+    const grace = Math.min(0.4 * g.conductor.beatDur, Math.max(0, (g.settings && g.settings.lateGraceMs != null ? g.settings.lateGraceMs : 25) / 1000));
+    this.pending = { resolveAt: this.strikeTick * g.conductor.beatDur / 8 + grace, ev, onHit };
+  }
+  /** Called from update(): resolve a pending strike (parry check, else the attack). Returns true when it resolved. */
+  resolvePending(g, vst) {
+    const pd = this.pending;
+    if (!pd || vst < pd.resolveAt) return false;
+    this.pending = null;
+    this.tele = false;
+    const atk = g.combat && typeof g.combat.findParry === 'function' ? g.combat.findParry(this) : null;
+    if (atk) { this.parry(g, atk, pd.ev); return true; }
+    this.strikeTick = null;
+    pd.onHit();
+    return true;
   }
   /** Ask the combat system whether the player's queued attack lands on this strike beat. */
   tryParry(g, ev) {
@@ -36,12 +61,12 @@ class Enemy {
   }
   /** Parried: cancel the strike, stun until the next bar downbeat beat event (Game applies the x2 damage). */
   parry(g, attack, ev = this.curEv) {
-    this.strikeTick = null; this.showHint = false;
+    this.strikeTick = null; this.showHint = false; this.pending = null;
     this.stunned = true; this.stunSince = g.vst ?? 0;
     if (this.state === 'strike' || this.state === 'tele' || this.state === 'swoop') this.state = this.type === 'bat' ? 'hover' : 'idle';
     this.tele = false;
     const fx = g.effects;
-    const top = this.y - this.r * 2 - 96;
+    const top = this.y - this.r * 2 - 40; // anchored on the enemy (effects.js keeps it off the player's text column)
     fx.text(this.x, top, 'PARRY!', { color: '#ffe45e', size: 34, life: 1.0, rise: 30, channel: 'parry' });
     fx.parryBurst(this.x, this.cy);
     if (ev) { g.logWorld('parry', this.id, ev); g.logWorld('enemy-stun', this.id, ev); }
@@ -175,15 +200,15 @@ export class Bat extends Enemy {
     const attackBar = inten !== 'low' || ev.barIndex % 2 === 1;
     this.fast = inten === 'high';
     if (bi === 2 && attackBar) {
-      this.state = 'tele'; this.tele = true; this.armStrike(ev);
+      this.state = 'tele'; this.tele = true; this.armStrike(ev, g);
       g.logWorld('bat-telegraph', this.id, ev);
     } else if (bi === 3 && this.state === 'tele') {
-      this.tele = false;
-      if (this.tryParry(g, ev)) return;
-      this.strikeTick = null;
-      this.state = 'swoop';
-      const tx = Math.min(this.x + 200, Math.max(this.x - 200, g.player.x));
-      this.sw = { t0: ev.beatSongTime, fx: this.x, fy: this.y, tx, ty: g.player.y - 30 };
+      // logged on the beat; resolved (parry or swoop) in update() at strikeTick + lateGrace
+      this.beginStrike(g, ev, () => {
+        this.state = 'swoop';
+        const tx = Math.min(this.x + 200, Math.max(this.x - 200, g.player.x));
+        this.sw = { t0: ev.beatSongTime, fx: this.x, fy: this.y, tx, ty: g.player.y - 30 };
+      });
       g.logWorld('bat-swoop', this.id, ev);
     } else {
       if (this.state === 'swoop') { this.state = 'return'; this.ret = { t0: ev.beatSongTime, fx: this.x, fy: this.y }; }
@@ -202,6 +227,7 @@ export class Bat extends Enemy {
     const bpm = g.conductor.bpm;
     const bf = vst / this.bd;
     const hoverY = this.baseY + Math.sin(bf * Math.PI) * this.amp;
+    this.resolvePending(g, vst);
     if (this.state === 'swoop') {
       const u = clamp01((vst - this.sw.t0) / (this.bd * 0.55));
       const e = u * u;
@@ -279,11 +305,9 @@ export class Guard extends Enemy {
       this.step = { t0: ev.beatSongTime, from: this.x, to: this.x + this.facing * dist };
       g.logWorld('guard-step', this.id, ev);
     }
-    if (bi === 2 && attackBar) { this.state = 'tele'; this.armStrike(ev); g.logWorld('guard-telegraph', this.id, ev); }
+    if (bi === 2 && attackBar) { this.state = 'tele'; this.armStrike(ev, g); g.logWorld('guard-telegraph', this.id, ev); }
     else if (bi === 3 && this.state === 'tele') {
-      if (this.tryParry(g, ev)) return;
-      this.strikeTick = null;
-      this.state = 'strike'; this.strikeT0 = ev.beatSongTime; this.strikeDone = false;
+      this.beginStrike(g, ev, () => { this.state = 'strike'; this.strikeT0 = ev.beatSongTime; this.strikeDone = false; });
       g.logWorld('guard-strike', this.id, ev);
     }
   }
@@ -297,6 +321,7 @@ export class Guard extends Enemy {
     this.y = g.level.groundY(this.x);
     this.flash = Math.max(0, this.flash - dt);
     this.blockT = Math.max(0, this.blockT - dt);
+    this.resolvePending(g, vst);
     if (this.state === 'strike' && !this.strikeDone && vst - this.strikeT0 < this.bd * 0.3) {
       const dx = (g.player.x - this.x) * this.facing;
       if (vst >= this.strikeT0 && dx > -6 && dx < 60 + 10 && Math.abs(g.player.y - this.y) < 40) {
@@ -314,7 +339,7 @@ export class Guard extends Enemy {
     ctx.strokeStyle = col; ctx.fillStyle = '#1a0d33'; ctx.shadowColor = '#ffb347'; ctx.shadowBlur = 10;
     ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     // body armour
-    ctx.beginPath(); ctx.roundRect(-14, -50, 28, 34, 6); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); roundRectPath(ctx, -14, -50, 28, 34, 6); ctx.fill(); ctx.stroke();
     // legs
     ctx.beginPath(); ctx.moveTo(-7, -16); ctx.lineTo(-8, 0); ctx.moveTo(7, -16); ctx.lineTo(8, 0); ctx.stroke();
     // helmet

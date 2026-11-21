@@ -1,10 +1,31 @@
-// Combat: BeatSnap attack queue, scheduled drum hits, impact frames, hit resolution, parry
-// (docs/DESIGN-BEATSNAP.md sections 3, 6, 7).
-import { beatSnap, JUDGE_MULTIPLIER, LEVEL_NAMES, stepTicksFor } from '../core/beatSnap.js';
-import { COLORS, JUDGE_COLORS } from './constants.js';
+// Combat: BeatSnap attack queues (one per drum), scheduled drum hits, impact frames, hit resolution, parry
+// (docs/DESIGN-BEATSNAP.md sections 3, 6, 7; docs/DESIGN-DRUMMER.md section 2).
+//
+// HUD contract (read by js/ui/hud.js), all derived from `game.combat`:
+//   combat.barHits        -> Array<{ id, tick, instrument: 'kick'|'snare', level, judgment, barIndex }>
+//                            hits that already CONNECTED (impact frame passed) in the bar currently playing and the
+//                            previous bar, in connect order. barIndex = floor(tick / 32); tick - 32 * barIndex is the
+//                            position in the bar (0..31; 0 / 8 / 16 / 24 are beats 1..4).
+//   combat.queued         -> Array<{ id, tick, connectSongTime, instrument, level, judgment, unison }>
+//                            attacks pressed but not yet connected (state 'pending'), up to 3 per instrument.
+//                            connectSongTime is the exact song time (s) the hit will land: draw it there.
+//   combat.pendingCountBy -> { kick: n, snare: n }
+//   combat.hitsInBar(b)   -> connected + queued hits of bar b, [{ id, tick, instrument, level, judgment }] (groove eval)
+//   combat.lastGroove     -> null | { id, name, nameEn, fever, score, barIndex, songTime } of the latest groove
+//   combat.stepTicks      -> current connect-grid step in ticks
+import { beatSnap, JUDGE_MULTIPLIER, stepTicksFor, TICKS_PER_BAR } from '../core/beatSnap.js';
+import { COLORS } from './constants.js';
+import { evaluateGroove } from '../core/groove.js';
 import { pushLog } from '../debug/debugHook.js';
 
-export const MAX_PENDING = 3;
+export const MAX_PENDING = 3; // per instrument
+export const INSTRUMENTS = Object.freeze(['kick', 'snare']);
+/** Instrument modifiers (v3 section 2): kick = heavy + big knockback (blockable); snare = quick, +20 px, pierces guards. */
+export const INSTRUMENT_STATS = Object.freeze({
+  kick: { dmg: 1.25, kb: 1.6, reach: 0, label: '咚' },
+  snare: { dmg: 0.8, kb: 0.6, reach: 20, label: '啪' },
+});
+export const UNISON_MULT = 1.5;
 
 export const MOVES = {
   down: { dmg: 3, range: 96, kb: 52, label: '強拍斬' },
@@ -15,10 +36,9 @@ export const MOVES = {
   finisher: { dmg: 4, range: 260, kb: 60, label: '小節終結' },
   fill: { dmg: 3, range: 200, kb: 50, label: '過門重擊' },
 };
-/** Moves a shield guard blocks from the front (eighth thrusts and shockwaves pierce). */
-const BLOCKABLE = new Set(['down', 'front', 'sub']);
+/** Moves a guard's shield can block from the front when thrown by the KICK (snare, combos and shockwaves pierce). */
+const BLOCKABLE = new Set(['down', 'front', 'back', 'sub']);
 const RADIAL = new Set(['finisher', 'fill']);
-const JUDGE_TEXT = { perfect: 'PERFECT', great: 'GREAT', good: 'GOOD', off: 'OFF' };
 const ARC_KIND = { down: 'down', front: 'front', sub: 'back', back: 'back', combo8: 'combo8', finisher: 'down', fill: 'down' };
 
 const clamp01 = (t) => Math.min(1, Math.max(0, t));
@@ -42,7 +62,9 @@ export class Combat {
 
   reset() {
     this.queue = [];
-    this.lastTick = -Infinity;
+    this.lastTickBy = { kick: -Infinity, snare: -Infinity }; // independent queues: each has its own minTick
+    this.hits = []; // connected hits (pruned to the last few bars)
+    this.lastGroove = null;
     this.nextId = 1;
     this._parryWatch = null;
   }
@@ -52,6 +74,44 @@ export class Combat {
 
   get busy() { return this.queue.length > 0; }
   get pendingCount() { return this.queue.filter((a) => a.state === 'pending').length; }
+  pendingOf(instrument) { let n = 0; for (const a of this.queue) if (a.state === 'pending' && a.instrument === instrument) n++; return n; }
+  get pendingCountBy() { return { kick: this.pendingOf('kick'), snare: this.pendingOf('snare') }; }
+
+  /** Bar index of the visual song time (HUD). */
+  get currentBar() { return Math.floor(this.game.vst / (this.game.conductor.beatDur * 4)); }
+
+  /** Connected hits of the current and previous bar, in connect order (HUD two-lane score). */
+  get barHits() {
+    const cur = this.currentBar;
+    return this.hits.filter((h) => h.barIndex >= cur - 1 && h.barIndex <= cur);
+  }
+
+  /** Pending attacks with their exact connect time (HUD). */
+  get queued() {
+    return this.queue.filter((a) => a.state === 'pending').map((a) => ({
+      id: a.id, tick: a.tick, connectSongTime: a.connectSongTime, instrument: a.instrument, level: a.level,
+      judgment: a.judgment, unison: !!a.unison,
+    }));
+  }
+
+  /** Connected + queued hits in one bar (used for groove evaluation, which runs on the next downbeat). */
+  hitsInBar(barIndex) {
+    const out = [];
+    const seen = new Set();
+    const lo = barIndex * TICKS_PER_BAR;
+    const hi = lo + TICKS_PER_BAR;
+    for (const h of this.hits) if (h.tick >= lo && h.tick < hi && !seen.has(h.id)) { seen.add(h.id); out.push(h); }
+    for (const a of this.queue) {
+      if (a.tick >= lo && a.tick < hi && !seen.has(a.id)) {
+        seen.add(a.id);
+        out.push({ id: a.id, tick: a.tick, instrument: a.instrument, level: a.level, judgment: a.judgment, barIndex });
+      }
+    }
+    return out;
+  }
+
+  /** Groove check for the bar that just ended (called by Game on each downbeat beat event). */
+  evaluateBar(barIndex) { return evaluateGroove(this.hitsInBar(barIndex), barIndex); }
 
   /** Parry geometry check shared by the audio prediction and findParry (spec 7). */
   _canParry(e) {
@@ -60,7 +120,10 @@ export class Combat {
     return Math.abs(e.x - p.x) <= reach + 30 && (e.x - p.x) * p.facing >= 0;
   }
 
-  /** Parry (spec 7): a queued attack whose tick equals the enemy's strikeTick. Independent of update order. */
+  /**
+   * Parry (spec 7): a queued attack (either drum; pending OR already impacted, since the strike is resolved up to
+   * lateGrace after its beat) whose tick equals the enemy's strikeTick. Independent of update order.
+   */
   findParry(e) {
     if (!e || e.strikeTick === null || e.strikeTick === undefined) return null;
     for (const a of this.queue) {
@@ -100,17 +163,21 @@ export class Combat {
     return { scheduledAudioTime, ctxNowAtSchedule, clamped: expected < ctxNowAtSchedule };
   }
 
-  /** Same code path for keyboard, touch and the debug hook. perfMs is in the performance.now() domain. */
-  pressAttack(perfMs) {
+  /**
+   * Same code path for keyboard, touch and the debug hook. perfMs is in the performance.now() domain.
+   * instrument: 'kick' (default) | 'snare'. Each instrument has its own queue (<= 3 pending, own minTick).
+   */
+  pressAttack(perfMs, instrument = 'kick') {
     const g = this.game;
     if (g.over) return null;
-    if (this.pendingCount >= MAX_PENDING) return null; // fourth press ignored
+    if (!INSTRUMENT_STATS[instrument]) instrument = 'kick';
+    if (this.pendingOf(instrument) >= MAX_PENDING) return null; // fourth press ignored
     const cond = g.conductor;
     const input = cond.inputSongTime(perfMs);
     const ctx = g.engine.ensure();
     const schedNow = ctx.currentTime - cond.beat0AudioTime;
     const strict = g.settings.lateGraceMs === 0;
-    const minTick = this.lastTick + 1;
+    const minTick = this.lastTickBy[instrument] + 1;
     const snap = beatSnap({
       inputSongTime: input,
       schedNowSongTime: schedNow,
@@ -120,20 +187,27 @@ export class Combat {
       minTick,
       strict,
     });
-    this.lastTick = snap.tick;
+    this.lastTickBy[instrument] = snap.tick;
+    // Unison: the other drum already holds this very tick (queued or just connected).
+    const partner = this.queue.find((a) => a.instrument !== instrument && a.tick === snap.tick) || null;
+    const unison = !!partner;
     const feverActive = g.fever.active;
-    const res = g.combo.registerAttack(snap, { fever: feverActive });
-    g.fever.onAttack(snap.judgment, res.combo);
+    const res = g.combo.registerAttack(snap, { fever: feverActive, instrument });
+    g.fever.onAttack(snap.judgment, unison ? (res.combo || 'unison') : res.combo);
 
     const kind = moveKindFor(snap.level, res.combo);
     const expectedAudioTime = cond.beat0AudioTime + snap.connectSongTime;
-    const desc = { level: snap.level, onBeat: snap.onBeat, fever: feverActive, combo: res.combo, parry: this._predictParry(snap.tick) };
+    const desc = {
+      instrument, level: snap.level, onBeat: snap.onBeat, fever: feverActive,
+      combo: unison ? 'unison' : res.combo, parry: this._predictParry(snap.tick),
+    };
     const sfx = this._schedule(desc, expectedAudioTime, kind);
 
-    const prev = this.queue.length ? this.queue[this.queue.length - 1] : null;
+    let prev = null; // latest earlier-connecting attack: this windup starts after it
+    for (const q of this.queue) if (q.state === 'pending' && q.connectSongTime <= snap.connectSongTime && (!prev || q.connectSongTime > prev.connectSongTime)) prev = q;
     const tickDur = cond.beatDur / 8;
     const attack = {
-      id: this.nextId++, kind, level: snap.level, tick: snap.tick, q: snap, combo: res.combo, comboRes: res,
+      id: this.nextId++, kind, instrument, unison, level: snap.level, tick: snap.tick, q: snap, combo: res.combo, comboRes: res,
       fever: feverActive,
       inputSongTime: input, connectSongTime: snap.connectSongTime, slotSongTime: snap.connectSongTime,
       state: 'pending', impactSongTime: null, parried: false, parry: false,
@@ -146,26 +220,37 @@ export class Combat {
       id: attack.id, inputSongTime: input, tick: snap.tick, connectSongTime: snap.connectSongTime,
       level: snap.level, weight: snap.weight, half: snap.half, rule: snap.rule, magnet: snap.magnet, late: snap.late,
       judgeTick: snap.judgeTick, judgeDeltaSec: snap.judgeDeltaSec, judgment: snap.judgment, onBeat: snap.onBeat,
-      kind, combo: res.combo, parry: false, fever: feverActive,
+      kind, instrument, unison, combo: res.combo, parry: false, fever: feverActive,
       stepTicks: snap.stepTicks, judgeStepTicks: snap.judgeStepTicks,
       sfxClamped: sfx.clamped, scheduledAudioTime: sfx.scheduledAudioTime, expectedAudioTime,
       ctxNowAtSchedule: sfx.ctxNowAtSchedule, impactSongTime: null,
       // extra fields so the audit can re-run the algorithm exactly
       schedNowSongTime: schedNow, minTick: Number.isFinite(minTick) ? minTick : null, strict,
+      pendingBefore: this.pendingOf(instrument),
       isDownbeat: snap.isDownbeat, beatIndex: snap.beatIndex, beatInBar: snap.beatInBar,
       predictedParry: desc.parry,
     };
     attack.log = entry;
     pushLog('attack', entry);
     this.queue.push(attack);
+    if (partner) {
+      // Both hits of a unison pair are x1.5; flag the partner (and its log) too.
+      partner.unison = true;
+      if (partner.log) partner.log.unison = true;
+    }
+    if (unison) {
+      g.combo.onUnison();
+      const fxp = g.effects;
+      fxp.text(g.player.x, g.player.y - 172, '齊奏!', { color: COLORS.down, size: 32, life: 1.0, rise: 36, channel: 'combo' });
+    }
 
-    // Judgment popup above the player's head: judgment + on/off beat + beat position name.
-    const early = snap.judgeDeltaSec < -0.045 ? ' 快' : snap.judgeDeltaSec > 0.045 ? ' 慢' : '';
-    const col = snap.level === 'bar' ? COLORS.down : snap.half === 'front' ? COLORS.front : COLORS.back;
-    g.effects.text(g.player.x, g.player.y - 96, JUDGE_TEXT[snap.judgment], {
-      color: JUDGE_COLORS[snap.judgment], size: snap.judgment === 'perfect' ? 26 : 22, life: 0.62, rise: 30, channel: 'judge',
-      sub: `${snap.onBeat ? '準拍' : '離拍'}・${LEVEL_NAMES[snap.level]}${early}`, subColor: col,
-    });
+    // Judgment popup above the player's head (single place that shows judgment).
+    const fxj = g.effects;
+    if (typeof fxj.judge === 'function') {
+      fxj.judge(g.player.x, g.player.y - 96, { judgment: snap.judgment, onBeat: snap.onBeat, level: snap.level });
+    } else {
+      fxj.text(g.player.x, g.player.y - 96, snap.judgment.toUpperCase(), { channel: 'judge', life: 0.62, rise: 30 });
+    }
     g.hudPulse = 1;
     return entry;
   }
@@ -191,7 +276,8 @@ export class Combat {
 
     // Pose: earliest pending attack wins; otherwise the recovering one.
     let pose = null;
-    const pend = this.queue.find((a) => a.state === 'pending');
+    let pend = null;
+    for (const a of this.queue) if (a.state === 'pending' && (!pend || a.connectSongTime < pend.connectSongTime)) pend = a;
     if (pend) {
       const tw = pend.connectSongTime - pend.swingSec;
       if (vst < tw) {
@@ -201,7 +287,8 @@ export class Combat {
         pose = { kind: pend.kind, level: pend.level, stage: 'slash', p: clamp01((vst - tw) / pend.swingSec) };
       }
     } else {
-      const rec = this.queue.find((a) => a.state === 'impact');
+      let rec = null;
+      for (const a of this.queue) if (a.state === 'impact' && (!rec || a.impactSongTime > rec.impactSongTime)) rec = a;
       if (rec) pose = { kind: rec.kind, level: rec.level, stage: 'recover', p: clamp01((vst - rec.impactSongTime) / this._recoverLen(rec)) };
     }
     g.player.pose = pose;
@@ -217,7 +304,13 @@ export class Combat {
     const p = g.player;
     const f = p.facing;
     const move = MOVES[a.kind];
-    const mult = JUDGE_MULTIPLIER[a.q.judgment] * g.fever.multiplier;
+    const inst = INSTRUMENT_STATS[a.instrument] || INSTRUMENT_STATS.kick;
+    const radial = RADIAL.has(a.kind);
+    const range = move.range + (radial ? 0 : inst.reach);
+    const mult = JUDGE_MULTIPLIER[a.q.judgment] * g.fever.multiplier * inst.dmg * (a.unison ? UNISON_MULT : 1);
+    this.hits.push({ id: a.id, tick: a.tick, instrument: a.instrument, level: a.level, judgment: a.judgment, barIndex: Math.floor(a.tick / TICKS_PER_BAR) });
+    const keepFrom = Math.floor(a.tick / TICKS_PER_BAR) - 3;
+    while (this.hits.length && this.hits[0].barIndex < keepFrom) this.hits.shift();
     const cx = p.x + f * 8;
     const cy = p.bodyY;
     const big = a.kind === 'down' || a.kind === 'finisher' || a.kind === 'fill';
@@ -225,7 +318,7 @@ export class Combat {
     const reduce = g.settings.reduceFlashing;
     const onBeat = a.q.onBeat;
 
-    fx.arc(cx, cy, f, ARC_KIND[a.kind], RADIAL.has(a.kind) ? MOVES.down.range : move.range);
+    fx.arc(cx, cy, f, ARC_KIND[a.kind], radial ? MOVES.down.range : range);
     const col = a.kind === 'back' || a.kind === 'sub' || a.kind === 'combo8' ? COLORS.back : big ? COLORS.down : COLORS.front;
     fx.burst(cx + f * 30, cy, big ? 22 : a.kind === 'sub' ? 5 : 10, { color: col, speed: big ? 320 : 220, angle: f > 0 ? 0 : Math.PI, spread: 1.6, size: big ? 4 : 3 });
     if (a.kind === 'down') { g.camera.addShake(5, reduce); fx.flashScreen(0.35, '#ffd24d', reduce); }
@@ -251,16 +344,16 @@ export class Combat {
       const dx = (e.x - p.x) * f;
       const dy = e.cy - p.bodyY;
       let hit = false;
-      if (RADIAL.has(a.kind)) {
+      if (radial) {
         hit = Math.hypot(e.x - p.x, dy) - e.r <= move.range;
       } else if (a.kind === 'back' || a.kind === 'combo8') {
-        hit = dx + e.r >= -4 && dx - e.r <= move.range && Math.abs(dy) <= 20 + e.r * 0.7;
+        hit = dx + e.r >= -4 && dx - e.r <= range && Math.abs(dy) <= 20 + e.r * 0.7;
       } else {
         const dist = Math.hypot(dx, dy) - e.r;
-        hit = dx + e.r >= 0 && dist <= move.range && (dx <= e.r || Math.abs(Math.atan2(dy, dx)) <= 1.08);
+        hit = dx + e.r >= 0 && dist <= range && (dx <= e.r || Math.abs(Math.atan2(dy, dx)) <= 1.08);
       }
       if (!hit) continue;
-      if (e.type === 'guard' && BLOCKABLE.has(a.kind) && e.blocks(p.x)) {
+      if (e.type === 'guard' && a.instrument !== 'snare' && BLOCKABLE.has(a.kind) && e.blocks(p.x)) {
         e.blockT = 0.18;
         fx.text(e.x, e.y - 90, 'BLOCK', { color: '#9fd8ff', size: 20, life: 0.6, rise: 24 });
         fx.burst(e.x + e.facing * 22, e.cy - 6, 8, { color: '#bfe9ff', speed: 200, angle: f > 0 ? Math.PI : 0, spread: 1.4 });
@@ -269,7 +362,7 @@ export class Combat {
         continue;
       }
       const dmg = move.dmg * mult;
-      g.damageEnemy(e, dmg, move.kb * (RADIAL.has(a.kind) ? Math.sign(e.x - p.x) || 1 : f), a.kind);
+      g.damageEnemy(e, dmg, move.kb * inst.kb * (radial ? Math.sign(e.x - p.x) || 1 : f), a.kind);
       hitAny = true;
     }
     if (hitAny) g.confirmHit(big);

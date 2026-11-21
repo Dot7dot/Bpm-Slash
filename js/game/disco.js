@@ -171,6 +171,11 @@ export function drawCrowd(ctx, camX, vst, bpm, info) {
   const b = info.b;
   const wild = info.fever || info.intensity === 'high';
   const dim = info.intensity === 'low' ? 0.8 : 1;
+  // crowd cheers (arms up) for ~2 beats after a recognised drum groove (game.lastGroove)
+  const fxs = stage.game && stage.game.effects;
+  const since = fxs ? vst - fxs.cheerVst : 99;
+  const cheer = since >= 0 && since < 2 * (60 / bpm);
+  const raised = wild || cheer;
   for (let row = 0; row < 2; row++) {
     const par = camX * (row ? 0.62 : 0.5);
     const sp = row ? 52 : 44;
@@ -185,7 +190,8 @@ export function drawCrowd(ctx, camX, vst, bpm, info) {
       const bb = beatInfoAt(vst - delay, bpm);
       const p = pulseAt(bb.beatPhase, bb.beatInBar);
       let jump = 0;
-      if (wild && bb.beatInBar === 0) jump = Math.exp(-bb.beatPhase * 4.5) * 22;
+      if (cheer) jump = Math.abs(Math.sin(since * Math.PI / (60 / bpm) * 2)) * 14;
+      else if (wild && bb.beatInBar === 0) jump = Math.exp(-bb.beatPhase * 4.5) * 22;
       else if (info.fever) jump = p * 10;
       const nod = p * 4;
       const hy = base - 46 * scale - nod - jump;
@@ -201,7 +207,7 @@ export function drawCrowd(ctx, camX, vst, bpm, info) {
       // head
       ctx.beginPath(); ctx.arc(0, hy, 8.5 * scale, 0, Math.PI * 2); ctx.fill();
       // raised arm(s)
-      if (wild && hr > 0.35) {
+      if (raised && hr > 0.35) {
         const wave = Math.sin(b.beatFloat * Math.PI + i * 1.7) * 6;
         ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = 4 * scale; ctx.lineCap = 'round';
         ctx.beginPath(); ctx.moveTo(-10 * scale, hy + 18 * scale); ctx.lineTo(-18 * scale + wave, hy - 12 * scale); ctx.stroke();
