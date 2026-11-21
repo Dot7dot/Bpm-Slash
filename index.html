@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#07031a">
+  <title>BPM Slash - 拍點斬</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="stage"><canvas id="game" width="960" height="540"></canvas></div>
+
+  <!-- 觸控按鈕（手機） -->
+  <div id="touch" aria-hidden="true">
+    <div class="touch-group">
+      <button id="t-left" class="tbtn" type="button">◀</button>
+      <button id="t-right" class="tbtn" type="button">▶</button>
+    </div>
+    <button id="t-pause" class="tbtn small" type="button">Ⅱ</button>
+    <button id="t-attack" class="tbtn attack" type="button">斬</button>
+  </div>
+
+  <!-- 主選單 -->
+  <main id="menu" class="screen">
+    <div class="panel">
+      <header class="title">
+        <h1>BPM <span>SLASH</span></h1>
+        <p>拍點斬　揮劍的瞬間，永遠落在節拍上</p>
+      </header>
+
+      <section class="card">
+        <h2>歌曲</h2>
+        <div class="row">
+          <button id="btn-default-song" class="btn" type="button">使用預設曲（88 BPM）</button>
+          <label class="btn file">
+            上傳 WAV / MP4
+            <input id="file-input" type="file" accept=".wav,.mp4,.m4a,audio/wav,audio/x-wav,audio/mp4,video/mp4">
+          </label>
+        </div>
+        <p id="song-status" class="status">載入中…</p>
+        <p id="song-msg" class="msg" role="status"></p>
+      </section>
+
+      <section class="card">
+        <h2>節奏設定</h2>
+        <div class="field">
+          <label for="bpm-num">BPM（40 – 240）</label>
+          <div class="row nowrap">
+            <input id="bpm-num" type="number" min="40" max="240" step="0.1" value="88">
+            <input id="bpm-range" type="range" min="40" max="240" step="0.1" value="88">
+          </div>
+        </div>
+        <div class="row">
+          <button id="btn-tap" class="btn" type="button">Tap Tempo</button>
+          <span id="tap-info" class="hint">跟著歌曲拍點連續點擊（至少 2 次）</span>
+        </div>
+        <div class="row">
+          <button id="btn-detect" class="btn" type="button">自動偵測</button>
+          <span id="detect-result" class="hint"></span>
+          <button id="btn-apply-detect" class="btn accent hidden" type="button">套用</button>
+        </div>
+        <div class="field">
+          <label for="offset-num">第一拍偏移（ms，0 – 10000）</label>
+          <div class="row nowrap">
+            <button id="offset-minus" class="btn small" type="button">−10</button>
+            <input id="offset-num" type="number" min="0" max="10000" step="1" value="0">
+            <button id="offset-plus" class="btn small" type="button">+10</button>
+          </div>
+        </div>
+        <div class="row">
+          <button id="btn-preview" class="btn accent" type="button">▶ 試聽對拍</button>
+          <span id="preview-dot" class="dot" aria-hidden="true"></span>
+          <span id="preview-state" class="hint">從頭播放歌曲並疊加節拍器；調整 BPM 或偏移會即時生效</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>判定與操作</h2>
+        <div class="grid2">
+          <div class="field">
+            <label for="calib-num">輸入延遲校正（ms，−150 ~ +150）</label>
+            <input id="calib-num" type="number" min="-150" max="150" step="1" value="0">
+            <p class="hint">正值＝你習慣按得比較晚，系統會把輸入往前修正</p>
+          </div>
+          <div class="field">
+            <label for="grace-num">延遲容許（ms，0 – 100）</label>
+            <input id="grace-num" type="number" min="0" max="100" step="1" value="40">
+            <p class="hint">稍晚按下時仍算命中前一個拍點；0 即嚴格模式</p>
+          </div>
+        </div>
+        <div class="field">
+          <span class="lbl">量化模式</span>
+          <div class="row">
+            <label class="radio"><input type="radio" name="quant" value="half" checked> 八分（前拍＋後拍）</label>
+            <label class="radio"><input type="radio" name="quant" value="beat"> 四分（僅前拍）</label>
+          </div>
+        </div>
+        <div class="row">
+          <label class="check"><input id="chk-metronome" type="checkbox" checked> 節拍器</label>
+          <label class="check"><input id="chk-reduce" type="checkbox"> 減少閃爍</label>
+        </div>
+        <div class="grid2">
+          <div class="field"><label for="music-vol">音樂音量</label><input id="music-vol" type="range" min="0" max="1" step="0.01" value="0.8"></div>
+          <div class="field"><label for="sfx-vol">音效音量</label><input id="sfx-vol" type="range" min="0" max="1" step="0.01" value="0.9"></div>
+        </div>
+      </section>
+
+      <button id="btn-start" class="btn start" type="button">開始遊戲</button>
+      <p class="hint center">← → / A D 移動　J / K / 空白鍵 攻擊　Esc / P 暫停</p>
+    </div>
+  </main>
+
+  <!-- 暫停 -->
+  <div id="pause" class="screen hidden">
+    <div class="panel narrow center">
+      <h2 class="big">暫停</h2>
+      <div class="col">
+        <button id="btn-resume" class="btn accent" type="button">繼續</button>
+        <button id="btn-quit" class="btn" type="button">回選單</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 結算 -->
+  <div id="results" class="screen hidden">
+    <div class="panel narrow center">
+      <h2 id="res-title" class="big">通關！</h2>
+      <div id="res-grade" class="grade">S</div>
+      <p class="score">分數 <b id="res-score">0</b></p>
+      <table class="stats">
+        <tbody>
+          <tr><th>最大連擊鏈</th><td id="res-chain">0</td><th>連段次數</th><td id="res-combos">0</td></tr>
+          <tr><th>PERFECT</th><td id="res-perfect">0</td><th>GREAT</th><td id="res-great">0</td></tr>
+          <tr><th>GOOD</th><td id="res-good">0</td><th>AUTO</th><td id="res-auto">0</td></tr>
+          <tr><th>前拍斬</th><td id="res-front">0</td><th>後拍刺</th><td id="res-back">0</td></tr>
+          <tr><th>強拍斬</th><td id="res-down">0</td><th>擊敗敵人</th><td id="res-kills">0</td></tr>
+        </tbody>
+      </table>
+      <div class="row center">
+        <button id="btn-again" class="btn accent" type="button">再玩一次</button>
+        <button id="btn-menu" class="btn" type="button">回選單</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="alert"></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

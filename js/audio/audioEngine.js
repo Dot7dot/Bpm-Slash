@@ -69,13 +69,14 @@ export class AudioEngine {
   // ---------- Loading ----------
 
   async decode(arrayBuffer) {
-    this.ensure();
-    return await this.ctx.decodeAudioData(arrayBuffer);
+    // Decoding does not need a running context; use an offline one before the first user gesture
+    // so that no AudioContext autoplay warnings are produced while the menu is idle.
+    const c = this.ctx || new OfflineAudioContext(1, 1, 44100);
+    return await c.decodeAudioData(arrayBuffer);
   }
 
   /** Load the bundled default song. Falls back to an in-memory click track on failure. */
   async loadDefaultSong() {
-    this.ensure();
     let meta = { ...DEFAULT_JSON };
     let metaOk = false;
     try {
@@ -98,7 +99,7 @@ export class AudioEngine {
     const sr = 22050;
     const beat = 60 / bpm;
     const total = Math.ceil(bars * 4 * beat * sr) + sr;
-    const buf = this.ctx.createBuffer(1, total, sr);
+    const buf = new AudioBuffer({ numberOfChannels: 1, length: total, sampleRate: sr });
     const d = buf.getChannelData(0);
     let seed = 99;
     const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2147483648 - 1; };

@@ -43,7 +43,7 @@
 - 啟動：`npm start` → `node tools/serve.mjs`（零相依靜態伺服器，預設 port 5173，可用 `PORT` 環境變數覆寫）。
   - `tools/serve.mjs` 必須 `export async function startServer({ port = 5173, root } = {})`，回傳 `{ url, port, close() }`；當檔案被直接執行時才自動啟動。`port: 0` 代表隨機可用 port。
   - 必須回傳正確 MIME：`.html .js .mjs .css .json .wav(audio/wav) .mp4(video/mp4) .m4a(audio/mp4) .png .svg`。
-- 測試：`npm test` → `node --test tests/`（Node 22 內建 test runner）。
+- 測試：`npm test` → `node --test "tests/*.test.mjs"`（Node 22 內建 test runner；Node 22 不接受直接傳入目錄）。
 - 邏輯畫布 960×540，CSS 等比縮放並處理 devicePixelRatio。
 - `js/core/` 底下的模組必須是**純函式、不得碰 DOM / Web Audio**，才能在 Node 中單元測試。
 
@@ -91,9 +91,11 @@
 ### 5.1 唯一主時鐘
 - 唯一可信的時鐘是 `AudioContext.currentTime`（下稱 **audio time**）。
 - **禁止**用 `setTimeout`、`setInterval`、`Date.now()` 或累加每幀 `dt` 來推算節拍。`dt` 只能用於與節拍無關的物理（例如玩家走路位移、粒子）。
-- 由於 `currentTime` 以音訊區塊為單位跳動，畫面需要平滑時間時，用 `ctx.getOutputTimestamp()` 將 `performance.now()` 換算為 audio time：
-  `audioNowSmooth = ts.contextTime + (performance.now() - ts.performanceTime) / 1000`
-  （不支援時退回 `ctx.currentTime`）。鍵盤事件使用 `event.timeStamp`（performance.now 時間域）換算成 audio time，比用「處理事件當下的時間」更準。
+- 由於 `currentTime` 以音訊區塊為單位跳動，畫面需要平滑時間時，用 `ctx.getOutputTimestamp()` 將 `performance.now()` 換算為 audio time。
+- **注意（修訂）**：依 Web Audio 規範，`getOutputTimestamp()` 回傳的 `contextTime` 是「輸出裝置此刻正在播放（聽到）的樣本」在 context 時間軸上的位置，它**本身已經包含輸出延遲**。因此：
+  `heardAudioNow = ts.contextTime + (performance.now() - ts.performanceTime) / 1000` ← 這已是聽覺域，**不可再扣 `outputLatency`**。
+  只有在 `getOutputTimestamp` 不支援／回傳無效值（0、NaN、與 `currentTime` 差距過大）時，才退回 `heardAudioNow = ctx.currentTime - outputLatencySec`。
+- 鍵盤事件使用 `event.timeStamp`（performance.now 時間域）以同一組 timestamp 換算成聽覺域 audio time，比用「處理事件當下的時間」更準。
 
 ### 5.2 名詞定義
 - `bpm`：使用者設定值，範圍 40–240，可到小數 0.1。
@@ -103,9 +105,10 @@
 - 音源啟動：`source.start(beat0AudioTime - offsetSec)`；若該時間已過去，改為 `source.start(now, now - (beat0AudioTime - offsetSec))`。
 - `outputLatencySec = ctx.outputLatency || ctx.baseLatency || 0`。
 - **排程域歌曲時間**（用於排程音效）：`schedSongTime(t) = t - beat0AudioTime`。
-- **聽覺域歌曲時間**（用於畫面、判定）：`heardSongTime(t) = t - outputLatencySec - beat0AudioTime`。
-- **畫面時間** `visualSongTime = heardSongTime(audioNowSmooth)`。
-- **輸入時間** `inputSongTime = heardSongTime(eventAudioTime) - inputCalibrationSec`（使用者「輸入延遲校正」，正值表示玩家習慣按晚，系統會把輸入往前修正）。
+- **聽覺域歌曲時間**（用於畫面、判定）：`heardSongTime(h) = h - beat0AudioTime`，其中 `h` 是 §5.1 的聽覺域 audio time（`heardAudioNow` 或由 `event.timeStamp` 換算出的聽覺域時間）。輸出延遲只在 §5.1 處理一次，絕不重複扣除。
+- **畫面時間** `visualSongTime = heardAudioNow - beat0AudioTime`。
+- **輸入時間** `inputSongTime = heardAudioTimeOf(event.timeStamp) - beat0AudioTime - inputCalibrationSec`（使用者「輸入延遲校正」，正值表示玩家習慣按晚，系統會把輸入往前修正）。
+- **物理限制**：排程只能排在 `ctx.currentTime` 之後，而 `currentTime` 比聽覺域超前約一個輸出延遲。若攻擊的 `expectedAudioTime < ctx.currentTime`（稍晚命中，或在拍點前不到一個輸出延遲才按下），音效只能立即播放；此時 log 記錄 `sfxClamped: true`，容許誤差為 `outputLatency + lateGraceSec`。
 
 ### 5.3 拍與小節
 - `beatFloat = songTime / beatDur`，`beatIndex = floor(beatFloat)`，`beatPhase = beatFloat - beatIndex`（0..1）。
@@ -247,7 +250,7 @@
 | `stop()` | 停止並回到選單 |
 | `pressAttack()` | 模擬一次攻擊輸入，走與鍵盤完全相同的程式路徑（時間取 `performance.now()`） |
 | `setInvincible(bool)` | 稽核時避免死亡 |
-| `getAttackLog()` | `[{ id, inputSongTime, slotIndex, slotSongTime, half, isDownbeat, deltaSec, judgment, late, scheduledAudioTime, expectedAudioTime, impactSongTime }]`（`impactSongTime` 在命中前為 `null`） |
+| `getAttackLog()` | `[{ id, inputSongTime, slotIndex, slotSongTime, half, isDownbeat, deltaSec, judgment, late, sfxClamped, scheduledAudioTime, expectedAudioTime, impactSongTime }]`（`impactSongTime` 在命中前為 `null`；`sfxClamped` 見 §5.2 物理限制） |
 | `getBeatLog()` | `[{ beatIndex, beatInBar, barIndex, beatSongTime, firedSongTime }]` |
 | `getWorldLog()` | `[{ kind, entityId, beatIndex, beatInBar, beatSongTime, firedSongTime }]`，kind ∈ `slime-hop, bat-telegraph, bat-swoop, guard-step, guard-telegraph, guard-strike, spike-telegraph, spike-up, spike-down, spawn` |
 | `getMetronomeLog()` | `[{ beatIndex, scheduledAudioTime, expectedAudioTime }]` |
@@ -259,7 +262,7 @@
 
 ## 11. 驗收標準
 
-1. 非 late 的攻擊：`|scheduledAudioTime − expectedAudioTime| ≤ 1 ms`；late 的攻擊：`0 < deltaSec ≤ lateGraceSec`。
+1. `sfxClamped === false` 的攻擊：`|scheduledAudioTime − expectedAudioTime| ≤ 1 ms`；`sfxClamped === true` 的攻擊：`0 ≤ scheduledAudioTime − expectedAudioTime ≤ outputLatency + lateGraceSec + 5 ms`；late 的攻擊：`0 ≤ deltaSec ≤ lateGraceSec`。正常遊玩（提早按）的攻擊中，`sfxClamped` 的比例應很低。
 2. 所有 `slotSongTime` 都是 `halfStep` 的整數倍（誤差 < 1e-6 s）；`'beat'` 模式只會出現偶數 slot；`half` 與 slot 奇偶一致。
 3. impact frame：`0 ≤ impactSongTime − slotSongTime ≤ 1 幀`（60 fps 下 ≤ 20 ms；headless 環境容許 ≤ 40 ms）。
 4. beat event 不漏拍、不重複，觸發延遲 ≤ 1 幀；強拍每 4 拍一次。
