@@ -1,0 +1,42 @@
+{
+  "title": "午夜放克 Midnight Funk（去鼓伴奏版）",
+  "bpm": 100,
+  "offsetMs": 0,
+  "beatsPerBar": 4,
+  "bars": 32,
+  "durationSec": 76.8,
+  "sampleRate": 22050,
+  "sections": [
+    {
+      "startBar": 0,
+      "endBar": 4,
+      "intensity": "low",
+      "name": "intro"
+    },
+    {
+      "startBar": 4,
+      "endBar": 12,
+      "intensity": "mid",
+      "name": "verse"
+    },
+    {
+      "startBar": 12,
+      "endBar": 20,
+      "intensity": "high",
+      "name": "chorus"
+    },
+    {
+      "startBar": 20,
+      "endBar": 24,
+      "intensity": "low",
+      "name": "breakdown"
+    },
+    {
+      "startBar": 24,
+      "endBar": 32,
+      "intensity": "high",
+      "name": "final"
+    }
+  ],
+  "drums": false
+}
