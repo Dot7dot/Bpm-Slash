@@ -361,6 +361,14 @@ const meta = {
   bars: BARS,
   durationSec: TOTAL_BEATS * 60 / BPM,
   sampleRate: SR,
+  // 人工標註的段落（小節為單位，endBar 不含）；遊戲優先採用（DESIGN-BEATSNAP §8）
+  sections: [
+    { startBar: 0, endBar: 4, intensity: 'low', name: 'intro' },
+    { startBar: 4, endBar: 12, intensity: 'mid', name: 'verse' },
+    { startBar: 12, endBar: 20, intensity: 'high', name: 'chorus' },
+    { startBar: 20, endBar: 24, intensity: 'low', name: 'breakdown' },
+    { startBar: 24, endBar: 32, intensity: 'high', name: 'final' },
+  ],
 };
 
 mkdirSync(OUT_DIR, { recursive: true });
