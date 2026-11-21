@@ -55,6 +55,78 @@ function synthTrack({ bpm, offsetSec, sampleRate, durationSec = 30, hats = true,
   return out;
 }
 
+// 無鼓的八分音符貝斯線：每個八分音符一個指數衰減的音（小節內拍點較重），每小節換和弦根音，
+// 小節開頭加一個緩慢衰減的和弦鋪底（小節級能量變化）。八分音符的 onset 強度與拍點接近，
+// 用來重現「只有 8 分音符」造成的倍速（2 倍）誤判。
+function synthBassLine({ bpm, offsetSec, sampleRate, durationSec = 30, seed = 7 }) {
+  const n = Math.floor(durationSec * sampleRate);
+  const out = new Float32Array(n);
+  const beatDur = 60 / bpm;
+  const eighth = beatDur / 2;
+  const roots = [55, 43.65, 65.41, 49]; // A1 F1 C2 G1
+  const addNote = (t0, freq, amp, decay, len) => {
+    const i0 = Math.floor(t0 * sampleRate);
+    const m = Math.floor(len * sampleRate);
+    for (let k = 0; k < m && i0 + k < n; k++) {
+      const t = k / sampleRate;
+      const att = Math.min(1, t / 0.004);
+      const ph = 2 * Math.PI * freq * t;
+      const tone = Math.sin(ph) + 0.35 * Math.sin(2 * ph) + 0.15 * Math.sin(3 * ph);
+      out[i0 + k] += amp * att * Math.exp(-t / decay) * tone;
+    }
+  };
+  for (let e = 0; ; e++) {
+    const t = offsetSec + e * eighth;
+    if (t >= durationSec) break;
+    const bar = Math.floor(e / 8);
+    const slot = e % 8;
+    const root = roots[bar % 4] * (slot === 6 && bar % 2 === 1 ? 2 : 1);
+    const amp = slot % 2 === 0 ? 0.6 : 0.42;
+    addNote(t, root, amp, 0.12, eighth * 0.95);
+  }
+  // 小節級鋪底：每小節開頭的和弦（根音 + 三度 + 五度），衰減 1.2 秒
+  for (let bar = 0; ; bar++) {
+    const t = offsetSec + bar * 4 * beatDur;
+    if (t >= durationSec) break;
+    const r = roots[bar % 4];
+    for (const mult of [1, 1.26, 1.5]) addNote(t, r * 2 * mult, 0.09, 0.5, 1.2);
+  }
+  return out;
+}
+
+// 16 分音符帽子為主的節奏：每拍一個底鼓，每個十六分音符一個短噪音嗶聲（八分音符處較重）。
+function synthSixteenthHats({ bpm, offsetSec, sampleRate, durationSec = 30, seed = 11 }) {
+  const n = Math.floor(durationSec * sampleRate);
+  const out = new Float32Array(n);
+  const beatDur = 60 / bpm;
+  const rng = makeRng(seed);
+  const addKick = (t0, amp) => {
+    const len = Math.floor(0.2 * sampleRate);
+    const i0 = Math.floor(t0 * sampleRate);
+    for (let k = 0; k < len && i0 + k < n; k++) {
+      const t = k / sampleRate;
+      out[i0 + k] += amp * Math.exp(-t * 25) * Math.sin(2 * Math.PI * (60 + 40 * Math.exp(-t * 40)) * t);
+    }
+  };
+  const addHat = (t0, amp) => {
+    const len = Math.floor(0.02 * sampleRate);
+    const i0 = Math.floor(t0 * sampleRate);
+    for (let k = 0; k < len && i0 + k < n; k++) {
+      const t = k / sampleRate;
+      out[i0 + k] += amp * Math.exp(-t * 250) * (rng() * 2 - 1);
+    }
+  };
+  for (let s = 0; ; s++) {
+    const t = offsetSec + s * (beatDur / 4);
+    if (t >= durationSec) break;
+    const beat = Math.floor(s / 4);
+    const sub = s % 4;
+    if (sub === 0) addKick(t, beat % 4 === 0 ? 0.9 : 0.6);
+    addHat(t, sub === 2 ? 0.2 : 0.12);
+  }
+  return out;
+}
+
 // 將偵測到的第一拍位置與真值比較（模 beatDur，處理環繞）。
 function circDiff(a, b, period) {
   const d = (((a - b) % period) + period) % period;
@@ -83,6 +155,25 @@ for (const sampleRate of RATES) {
       });
     }
   }
+}
+
+for (const sampleRate of RATES) {
+  for (const bpm of [88, 96, 120]) {
+    test(`8th-note bass line without drums, ${bpm} BPM (quarter tempo, not double), ${sampleRate} Hz`, () => {
+      const samples = synthBassLine({ bpm, offsetSec: 0.05, sampleRate });
+      const r = detectBpm(samples, sampleRate);
+      assert.ok(Math.abs(r.bpm - bpm) <= 0.5, `bpm ${r.bpm} vs truth ${bpm}`);
+      const od = circDiff(r.offsetSec, 0.05, 60 / bpm);
+      assert.ok(od <= 0.015, `offset ${r.offsetSec} vs truth 0.05 (diff ${od.toFixed(4)} s)`);
+    });
+  }
+  test(`16th-note hat-heavy track at 128 BPM (not halved/doubled), ${sampleRate} Hz`, () => {
+    const samples = synthSixteenthHats({ bpm: 128, offsetSec: 0.1, sampleRate });
+    const r = detectBpm(samples, sampleRate);
+    assert.ok(Math.abs(r.bpm - 128) <= 0.5, `bpm ${r.bpm} vs 128`);
+    const od = circDiff(r.offsetSec, 0.1, 60 / 128);
+    assert.ok(od <= 0.015, `offset ${r.offsetSec} vs truth 0.1 (diff ${od.toFixed(4)} s)`);
+  });
 }
 
 test('silence returns bpm 0 without throwing', () => {
@@ -161,17 +252,17 @@ test('default 88 BPM song with drums (rendered in memory): 88 BPM and grid offse
   assert.ok(od <= 0.015, `offset ${r.offsetSec} (diff ${od.toFixed(4)} s)`);
 });
 
-test('default 88 BPM drumless WAV (skipped if not generated yet)', (t) => {
+test('default 88 BPM drumless WAV (skipped if not generated yet): 88 BPM and grid offset 0', (t) => {
   if (!existsSync(DEFAULT_WAV)) {
     t.skip('assets/audio/default-88bpm.wav 尚未產生');
     return;
   }
   const { samples, sampleRate } = parseWav16(readFileSync(DEFAULT_WAV));
   const r = detectBpm(samples, sampleRate);
-  // 去鼓伴奏沒有明確的鼓點，節奏估計可能落在 88 的倍數或約數上（實測為 176，即 2 倍）。
-  // 因此只斷言 tempo 為 44、88、176 其一（容許 ±0.5），不要求 offset 與 88 格線對齊。
-  const candidates = [44, 88, 176];
-  const near = candidates.some((c) => Math.abs(r.bpm - c) <= 0.5);
-  assert.ok(near, `bpm ${r.bpm} should be 44, 88 or 176 (±0.5)`);
-  assert.ok(r.offsetSec >= 0 && r.offsetSec < 60 / r.bpm, `offset ${r.offsetSec} out of range`);
+  // 去鼓伴奏只有八分音符的貝斯與主旋律，偵測必須落在四分音符速度 88（不可為 176 或 44）。
+  assert.ok(Math.abs(r.bpm - 88) <= 0.5, `bpm ${r.bpm} vs 88`);
+  const beatDur = 60 / 88;
+  assert.ok(r.offsetSec >= 0 && r.offsetSec < beatDur, `offset ${r.offsetSec} out of range`);
+  const od = circDiff(r.offsetSec, 0, beatDur);
+  assert.ok(od <= 0.02, `offset ${r.offsetSec} (diff ${od.toFixed(4)} s)`);
 });
