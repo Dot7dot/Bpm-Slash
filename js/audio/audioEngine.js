@@ -1,6 +1,6 @@
 // AudioEngine: AudioContext ownership, decoding, song playback, SFX synthesis, metronome scheduler.
 import { mod } from '../core/beatMath.js';
-import { SfxVoices, makeNoiseBuffer } from './sfxVoices.js';
+import { SfxVoices, makeNoiseBuffer, KIND_TO_DESC } from './sfxVoices.js';
 
 const DEFAULT_JSON = { title: '預設曲 Neon Pulse', bpm: 88, offsetMs: 0, beatsPerBar: 4, bars: 32 };
 
@@ -40,7 +40,13 @@ export class AudioEngine {
     this.sfxGain = c.createGain();
     this.clickGain = c.createGain();
     this.musicGain.connect(this.master);
-    this.sfxGain.connect(this.master);
+    // Soft clip (tanh, no lookahead / zero latency, so onsets are not shifted) as a safety net on the SFX bus.
+    const curve = new Float32Array(1025);
+    for (let i = 0; i < curve.length; i++) { const x = (i / 512) - 1; curve[i] = Math.tanh(x * 1.2) / Math.tanh(1.2); }
+    this.sfxShaper = c.createWaveShaper();
+    this.sfxShaper.curve = curve;
+    this.sfxGain.connect(this.sfxShaper);
+    this.sfxShaper.connect(this.master);
     this.clickGain.connect(this.master);
     this.setVolumes(this.volumes);
     // Shared white-noise buffer + synth voices (js/audio/sfxVoices.js).
@@ -203,39 +209,37 @@ export class AudioEngine {
   playClick(when, accent) { this.voices.click(when, accent); }
 
   /**
-   * Attack SFX scheduled on the audio clock. Returns the audio time actually passed to start().
-   * kind: front | down | back | finisher | combo8
+   * v2 hit SFX (drum kit) scheduled on the audio clock.
+   * playHit(desc, expectedAudioTime) -> { scheduledAudioTime, ctxNowAtSchedule, clamped }.
+   * Transitional: playHit(boolean) behaves like the old reactive hit (= playConfirmHit).
    */
-  playAttack(kind, expected) {
+  playHit(desc, expected) {
+    if (typeof desc === 'boolean' || desc === undefined) { this.playConfirmHit(!!desc); return undefined; }
     const ctx = this.ensure();
-    const now = ctx.currentTime;
-    this.lastAttackCtxNow = now;
-    const when = expected > now ? expected : now;
-    this.voices.attack(kind, when);
-    return when;
+    const ctxNowAtSchedule = ctx.currentTime;
+    const when = expected > ctxNowAtSchedule ? expected : ctxNowAtSchedule;
+    this.lastAttackCtxNow = ctxNowAtSchedule;
+    this.voices.hit(desc, when);
+    return { scheduledAudioTime: when, ctxNowAtSchedule, clamped: expected < ctxNowAtSchedule };
   }
 
-  playHit(strong = false) {
-    const c = this.ensure(); const t = c.currentTime;
-    this._noise(t, { f0: 1800, f1: 400, q: 0.8, dur: 0.1, gain: strong ? 0.5 : 0.35 });
-    this._tone(t, { type: 'square', f0: strong ? 260 : 380, f1: 90, dur: 0.12, gain: strong ? 0.28 : 0.18 });
+  /** Deprecated: old attack kinds; returns the audio time passed to start(). */
+  playAttack(kind, expected) {
+    const r = this.playHit(KIND_TO_DESC[kind] || KIND_TO_DESC.front, expected);
+    return r.scheduledAudioTime;
   }
-  playBlock() {
-    const c = this.ensure(); const t = c.currentTime;
-    this._tone(t, { type: 'square', f0: 1500, f1: 900, dur: 0.09, gain: 0.2 });
-    this._noise(t, { f0: 7000, q: 2, dur: 0.06, gain: 0.3, type: 'highpass' });
-    this._tone(t, { type: 'triangle', f0: 3000, f1: 2200, dur: 0.12, gain: 0.1 });
-  }
+
+  // Reactive confirm sounds (fire at impact time): soft attack, low level, tonal.
+  playConfirmHit(big = false) { const c = this.ensure(); this.voices.confirmHit(c.currentTime, big); }
+  playConfirmBlock() { const c = this.ensure(); this.voices.confirmBlock(c.currentTime); }
+  playConfirmKill() { const c = this.ensure(); this.voices.confirmKill(c.currentTime); }
+  playBlock() { this.playConfirmBlock(); }
   playHurt() {
     const c = this.ensure(); const t = c.currentTime;
     this._tone(t, { type: 'sawtooth', f0: 320, f1: 70, dur: 0.3, gain: 0.4 });
     this._noise(t, { f0: 600, f1: 150, dur: 0.25, gain: 0.35, type: 'lowpass' });
   }
-  playKill() {
-    const c = this.ensure(); const t = c.currentTime;
-    this._tone(t, { type: 'triangle', f0: 500, f1: 1400, dur: 0.14, gain: 0.25 });
-    this._noise(t, { f0: 2500, f1: 800, dur: 0.12, gain: 0.25 });
-  }
+  playKill() { this.playConfirmKill(); }
   playGo() {
     const c = this.ensure(); const t = c.currentTime;
     this._tone(t, { type: 'square', f0: 880, dur: 0.25, gain: 0.12 });
