@@ -45,7 +45,8 @@ function mulberry32(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const rand = mulberry32(SEED);
+// PRNG 狀態於 renderMix() 內重設（見下方）
+let rand = null;
 const noise = () => rand() * 2 - 1;
 
 // ---------- 濾波器（單極點）----------
@@ -68,7 +69,9 @@ function makeLP(fc) {
 }
 
 // ---------- 混音緩衝與音符工具 ----------
-const mix = new Float64Array(TOTAL_SAMPLES);
+// 混音緩衝與打擊樂開關（於 renderMix() 內設定）
+let mix = null;
+let drumsOn = true;
 
 // render(t) 的 t 為相對於本音的秒數（由整數 sample 計算）
 function voice(startSample, durSec, render) {
@@ -77,6 +80,17 @@ function voice(startSample, durSec, render) {
     const idx = startSample + i;
     if (idx >= TOTAL_SAMPLES) break;
     mix[idx] += render(i / SR);
+  }
+}
+
+// 打擊樂專用：關閉時仍呼叫 render 以消耗相同的 PRNG 序列，使其他樂器的隨機值與含鼓版逐位元相同
+function drumVoice(startSample, durSec, render) {
+  const n = Math.ceil(durSec * SR);
+  for (let i = 0; i < n; i++) {
+    const idx = startSample + i;
+    if (idx >= TOTAL_SAMPLES) break;
+    const v = render(i / SR);
+    if (drumsOn) mix[idx] += v;
   }
 }
 
@@ -90,7 +104,7 @@ function hz(name) {
 // ---------- 樂器 ----------
 function kick(start, gain) {
   let phase = 0;
-  voice(start, 0.3, (t) => {
+  drumVoice(start, 0.3, (t) => {
     const f = 45 + 105 * Math.exp(-t * 28); // 150 Hz → 45 Hz 的頻率掃掠
     phase += (2 * Math.PI * f) / SR;
     const body = Math.sin(phase) * Math.exp(-t * 14);
@@ -101,7 +115,7 @@ function kick(start, gain) {
 
 function snare(start, gain) {
   const hp = makeHP(900);
-  voice(start, 0.25, (t) => {
+  drumVoice(start, 0.25, (t) => {
     const n = hp(noise());
     const tone = Math.sin(2 * Math.PI * 180 * t) * Math.exp(-t / 0.05);
     return gain * (0.6 * n * Math.exp(-t / 0.055) + 0.5 * tone);
@@ -112,13 +126,13 @@ function hat(start, gain, open = false) {
   const hp = makeHP(6000);
   const decay = open ? 0.045 : 0.008;
   const len = open ? 0.15 : 0.03;
-  voice(start, len, (t) => gain * hp(noise()) * Math.exp(-t / decay));
+  drumVoice(start, len, (t) => gain * hp(noise()) * Math.exp(-t / decay));
 }
 
 function clap(start, gain) {
   const hp = makeHP(900);
   const lp = makeLP(4000);
-  voice(start, 0.2, (t) => {
+  drumVoice(start, 0.2, (t) => {
     const n = lp(hp(noise()));
     let env = 0;
     for (const off of [0, 0.011, 0.022]) {
@@ -200,7 +214,7 @@ function sweep(startSample, endSample, gain) {
 
 function crash(start, gain) {
   const hp = makeHP(2500);
-  voice(start, 2.0, (t) => gain * hp(noise()) * Math.exp(-t / 0.7));
+  drumVoice(start, 2.0, (t) => gain * hp(noise()) * Math.exp(-t / 0.7));
 }
 
 // ---------- 編曲資料 ----------

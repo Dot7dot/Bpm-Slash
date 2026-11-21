@@ -8,10 +8,12 @@ export const EPS = 1e-9;
 
 export const JUDGE_WINDOWS = Object.freeze({ perfect: 0.045, great: 0.09, good: 0.14 });
 export const JUDGE_MULTIPLIER = Object.freeze({ perfect: 1.5, great: 1.25, good: 0.6, off: 0.4 });
-export const DEFAULT_LATE_GRACE = 0.04;
+export const DEFAULT_LATE_GRACE = 0.025;
 export const DEFAULT_MIN_WINDUP = 0.05;
 export const DEFAULT_MARGIN = 0.005;
 export const DEFAULT_MAGNET_MAX_WAIT = 0.2;
+/** v3 F2: the magnet wait cap is relative: max(magnetMaxWaitSec, MAGNET_BEAT_FRACTION * beatDur). */
+export const MAGNET_BEAT_FRACTION = 0.35;
 export const AUTO_MIN_SUBDIV_SEC = 0.11;
 export const SUBDIVISIONS = Object.freeze([1, 2, 4, 8]);
 export const LEVELS = Object.freeze(['bar', 'half', 'beat', 'eighth', 'sixteenth', 'thirtysecond']);
@@ -126,7 +128,8 @@ export function beatSnap({
     const lo = Math.max(Math.ceil(earliest / tickDur - EPS), minTick, schedMinTick);
     const c0 = Math.ceil(lo / S) * S;
     const c1 = c0 + S;
-    if (weightOfTick(c1) >= 3 && weightOfTick(c1) > weightOfTick(c0) && time(c1) - time(c0) <= magnetMaxWaitSec + EPS) {
+    const magnetCap = Math.max(magnetMaxWaitSec, MAGNET_BEAT_FRACTION * beatDur);
+    if (weightOfTick(c1) >= 3 && weightOfTick(c1) > weightOfTick(c0) && time(c1) - time(c0) <= magnetCap + EPS) {
       tick = c1; magnet = true;
     } else {
       tick = c0;
