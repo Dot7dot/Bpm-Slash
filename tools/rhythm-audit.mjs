@@ -6,9 +6,10 @@
 //        [--skip-browser] [--skip-wav] [--json <reportPath>] [--quick]
 //        [--shots <dir>] [--bars 4] [--seed 12345] [--headed]
 //
-// Part A：離線分析 WAV（onset 對 8 分音符網格的誤差 + 獨立估計 tempo）。
+// Part A：離線分析（去鼓）背景音樂 WAV（貝斯／旋律音符 onset 對 8 分音符網格的誤差 + 獨立估計 tempo；88 或 ×2 皆接受）。
 // Part B：以 Playwright 開啟遊戲，透過 window.__BPM_SLASH_DEBUG__ 驗證
-//         BeatSnap 攻擊量化、拍點事件、世界事件、節拍器、鼓組音效（DESIGN-BEATSNAP.md §3–§11 與 DESIGN.md §5 §7）。
+//         BeatSnap 攻擊量化（雙鼓各自佇列）、齊奏、鼓手節奏型 groove、拍點事件、世界事件、節拍器、鼓組音效
+//         （DESIGN-BEATSNAP.md §3–§11、DESIGN-DRUMMER.md §2–§7 與 DESIGN.md §5 §7）。
 // 結束碼：沒有任何 FAIL 才是 0。
 //
 // 零相依（Playwright 為預先安裝的全域套件，找不到時會 SKIPPED，不會 crash）。
@@ -27,7 +28,7 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 function parseArgs(argv) {
   const o = {
     url: null, wav: null, bpm: null, skipBrowser: false, skipWav: false,
-    json: null, only: null, quick: false, shots: null, bars: 4, seed: 20240607, headed: false, help: false,
+    json: null, only: null, quick: false, shots: null, bars: 6, seed: 20240607, headed: false, help: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -62,7 +63,7 @@ const HELP = `rhythm-audit：BPM Slash 節奏對拍稽核
   --only <bpm,..>   Part B 只跑指定 BPM 的設定（例：--only 240）
   --quick           Part B 只跑 88 auto、150 auto、120 strict
   --shots <dir>     每個設定存一張截圖
-  --bars <n>        每個設定連按的小節數（預設 4）
+  --bars <n>        每個設定連按的小節數（預設 6）
   --seed <n>        PRNG 種子
   --headed          顯示瀏覽器視窗`;
 
@@ -157,8 +158,28 @@ export function parseWav(buf) {
   return { sampleRate: fmt.sampleRate, channels: fmt.channels, frames, durationSec: frames / fmt.sampleRate, samples: mono };
 }
 
+/**
+ * 軟起音（貝斯／旋律音符：線性漸強 6–10 ms）的起點精修：以「偵測點附近峰值的 5%」為門檻，從偵測點往回走到
+ * 整流後的 1 ms 滑動最大值掉到門檻以下為止（最多回走 20 ms），避免把 20% 峰值處當成起點而系統性偏晚。
+ */
+export function refineSoftOnset(x, sr, i, frac = 0.04) {
+  const pre = Math.round(0.002 * sr); const post = Math.round(0.02 * sr); const w = Math.max(1, Math.round(0.001 * sr));
+  const back = Math.round(0.02 * sr);
+  const env = (k) => { let m = 0; for (let q = Math.max(0, k - w + 1); q <= k; q++) m = Math.max(m, Math.abs(x[q])); return m; };
+  let peak = 0;
+  for (let k = Math.max(0, i - pre); k < Math.min(x.length, i + post); k++) peak = Math.max(peak, Math.abs(x[k]));
+  // 背景（鋪底 pad 與前一個音的尾巴）= 偵測點前 20 ms 內 1 ms 滑動最大值的最小值；門檻 = 背景 + frac 的（峰值 − 背景）
+  let bg = Infinity;
+  const lim = Math.max(w, i - back);
+  for (let k = i; k >= lim; k--) bg = Math.min(bg, env(k));
+  const thr = bg + frac * Math.max(0, peak - bg);
+  let j = i;
+  while (j > lim && env(j) > thr) j--;
+  return j + 1;
+}
+
 /** 偵測打擊樂 onset，回傳 { onsets: 秒[], tempoEnv } */
-export function detectOnsets(x, sr) {
+export function detectOnsets(x, sr, { riseDb = 6, floorDb = -50, refine = false } = {}) {
   const win = Math.max(2, Math.round(0.004 * sr));
   const hop = Math.max(1, Math.round(0.002 * sr));
   const n = x.length;
@@ -197,7 +218,7 @@ export function detectOnsets(x, sr) {
     let recentMax = -Infinity;
     for (let j = Math.max(0, i - recentFrames); j <= i - span; j++) if (envDb[j] > recentMax) recentMax = envDb[j];
     const rise = envDb[i] - recentMax;
-    if (rise >= 6 && envDb[i] > -50) {
+    if (rise >= riseDb && envDb[i] > floorDb) {
       // 往後找這次上升的峰值再回頭做樣本級精修
       // 起音一定落在「被偵測到的那個窗」之內或剛好之前；縮小搜尋範圍避免抓到鄰近的其他聲音
       const s0 = Math.max(0, (i - 1) * hop);
@@ -206,6 +227,7 @@ export function detectOnsets(x, sr) {
       for (let k = s0; k < s1; k++) { const v = sampleScore(k); if (v > peak) peak = v; }
       let onsetSample = s0;
       for (let k = s0; k < s1; k++) { if (sampleScore(k) >= 0.2 * peak) { onsetSample = k; break; } }
+      if (refine) onsetSample = refineSoftOnset(x, sr, onsetSample);
       onsets.push(onsetSample / sr);
       last = i;
     }
@@ -295,7 +317,8 @@ function analyzeWav(opts) {
   report.sampleRate = wav.sampleRate; report.channels = wav.channels; report.durationSec = wav.durationSec;
   c.add('A1', 'WAV 解析', 'PASS', `${wav.sampleRate} Hz / ${wav.channels} ch / ${f(wav.durationSec, 2)} s`);
 
-  const { onsets, flux, hopSec } = detectOnsets(wav.samples, wav.sampleRate);
+  // 軟起音（貝斯 / 旋律 6–10 ms 漸強）會讓門檻偵測系統性偏晚，所以用 refine 回推到音符升起處。
+  const { onsets, flux, hopSec } = detectOnsets(wav.samples, wav.sampleRate, { refine: true });
   const half = 30 / bpm;
   const errs = onsets.map((t) => {
     const k = Math.round((t - offsetSec) / half);
@@ -309,15 +332,29 @@ function analyzeWav(opts) {
   for (const t of onsets) { const ph = (2 * Math.PI * (t / half)); sx += Math.cos(ph); sy += Math.sin(ph); }
   let fitOffset = (Math.atan2(sy, sx) / (2 * Math.PI)) * half; // 範圍 (-half/2, half/2]
   report.onsets = { count: onsets.length, meanAbsMs: st.mean * 1000, p95Ms: st.p95 * 1000, maxMs: st.max * 1000, within10msFraction: within10, fitOffsetMs: fitOffset * 1000 };
-  c.check('A2', `onset 對齊 8 分音符網格（平均誤差 ≤ 5 ms）`,
+  const drumless = report.meta && report.meta.drums === false;
+  report.drumless = !!drumless;
+  c.check('A2', `${drumless ? '去鼓背景音樂：貝斯／旋律音符' : 'onset'} 對齊 8 分音符網格（平均誤差 ≤ 5 ms）`,
     onsets.length >= 8 && st.mean <= 0.005,
     `onset=${onsets.length}，平均 |誤差|=${ms(st.mean)} ms，p95=${ms(st.p95)} ms，max=${ms(st.max)} ms，±10 ms 內=${f(within10 * 100, 1)}%（網格偏移 ${f(offsetSec * 1000, 1)} ms；擬合偏移 ${ms(fitOffset, 1)} ms）`,
     report.onsets);
+  {
+    const dense = detectOnsets(wav.samples, wav.sampleRate, { refine: true, riseDb: 4, floorDb: -55 }).onsets;
+    const de = dense.map((t) => Math.abs(t - Math.round((t - offsetSec) / half) * half - offsetSec));
+    const ds = stats(de);
+    report.denseOnsets = { count: dense.length, meanAbsMs: ds.mean * 1000, p95Ms: ds.p95 * 1000 };
+    c.add('A2d', '較敏感偵測（rise ≥ 4 dB）的參考統計', 'INFO', `onset=${dense.length}，平均 |誤差|=${ms(ds.mean)} ms，p95=${ms(ds.p95)} ms（含較多其他聲部與瞬態，僅供參考）`);
+  }
   const tempo = estimateTempo(flux, hopSec);
   report.tempo = tempo;
-  c.check('A3', `獨立估計 tempo = ${bpm} ± 0.5 BPM`,
-    Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - bpm) <= 0.5,
-    `估計 ${f(tempo.bpm, 3)} BPM（信心 ${f(tempo.confidence, 2)}）`, tempo);
+  // 去鼓曲沒有每拍的大鼓，onset 密度以八分音符為主：估計值為 bpm 或其 2 倍（例 176）都視為 bpm，並在說明中記錄。
+  const ratio = tempo.bpm / bpm;
+  const direct = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - bpm) <= 0.5;
+  const doubled = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - 2 * bpm) <= 1.0;
+  const halved = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - bpm / 2) <= 0.5;
+  c.check('A3', `獨立估計 tempo = ${bpm} BPM（或 ×2 = ${2 * bpm}，視為同一 tempo）`,
+    direct || doubled || halved,
+    `估計 ${f(tempo.bpm, 3)} BPM（信心 ${f(tempo.confidence, 2)}）${direct ? '' : doubled ? `；為標稱的 ${f(ratio, 2)} 倍（去鼓伴奏的 onset 落在八分音符，倍速判定為 ${bpm}）` : halved ? '；為標稱的一半，視為同一 tempo' : ''}`, tempo);
   return { checks: c.items, report };
 }
 
@@ -345,7 +382,7 @@ export function judgmentOf(deltaSec) {
 }
 
 /** §3.2 參考實作。p: { t, s, bpm, subdivision, lateGraceSec, minTick, strict } */
-export function snapRef({ t, s, bpm, subdivision = 'auto', lateGraceSec = 0.04, minTick = -Infinity, strict = false }) {
+export function snapRef({ t, s, bpm, subdivision = 'auto', lateGraceSec = 0.025, minTick = -Infinity, strict = false }) {
   const tickDur = 60 / bpm / 8;
   const time = (k) => (k * 60 / bpm) / 8;
   const S = stepRef(subdivision, bpm);
@@ -363,7 +400,7 @@ export function snapRef({ t, s, bpm, subdivision = 'auto', lateGraceSec = 0.04, 
     c0 = Math.max(c0, minTick, schedMin);
     c0 = Math.ceil(c0 / S) * S;
     const c1 = c0 + S;
-    if (WEIGHT_OF[LEVEL_OF(c1)] >= 3 && WEIGHT_OF[LEVEL_OF(c1)] > WEIGHT_OF[LEVEL_OF(c0)] && time(c1) - time(c0) <= 0.2 + 1e-9) { tick = c1; magnet = true; }
+    if (WEIGHT_OF[LEVEL_OF(c1)] >= 3 && WEIGHT_OF[LEVEL_OF(c1)] > WEIGHT_OF[LEVEL_OF(c0)] && time(c1) - time(c0) <= Math.max(0.2, 0.35 * (60 / bpm)) + 1e-9) { tick = c1; magnet = true; }
     else tick = c0;
     rule = 'snap';
   }
@@ -379,18 +416,20 @@ export function combosRef(attacks) {
   let lastEighth = -Infinity; let run = 0; let runStep = 0; let lastTick = -Infinity;
   for (const a of attacks) {
     const s = a.tick;
-    if (run > 0 && s - lastTick === a.stepTicks && runStep === a.stepTicks) run++; else { run = 1; runStep = a.stepTicks; }
-    lastTick = s;
+    const partner = ticks.has(s); // v3：另一支鼓落在同一 tick（齊奏夥伴）不重複觸發也不推進 run
+    if (partner) { /* run 不變 */ } else if (run > 0 && s - lastTick === a.stepTicks && runStep === a.stepTicks) run++; else { run = 1; runStep = a.stepTicks; }
+    if (!partner) lastTick = s;
     ticks.add(s);
+    for (const v of ticks) if (v < s - 40) ticks.delete(v);
     let bar = false;
-    if (modInt(s, 32) === 24) {
+    if (!partner && modInt(s, 32) === 24) {
       const base = s - 24;
       bar = ticks.has(base) && ticks.has(base + 8) && ticks.has(base + 16);
       if (bar) for (const v of ticks) if (v >= base && v < s && modInt(v, 8) !== 0) bar = false;
     }
-    const fill = !bar && run >= 4 && modInt(s, 32) === 0;
+    const fill = !partner && !bar && run >= 4 && modInt(s, 32) === 0;
     let eighth = false;
-    if (!bar && !fill && modInt(s, 8) === 4) {
+    if (!partner && !bar && !fill && modInt(s, 8) === 4) {
       const k = s - 12;
       eighth = k > lastEighth && ticks.has(k) && ticks.has(k + 4) && ticks.has(k + 8);
     }
@@ -401,13 +440,28 @@ export function combosRef(attacks) {
   return out;
 }
 
+/** DESIGN-DRUMMER §4 參考實作（獨立再實作）。hits: [{tick, instrument}]，barIndex 該小節。回傳 'rock' | 'fourOnFloor' | 'backbeat' | null */
+export function grooveRef(hits, barIndex) {
+  const kick = new Set(); const snare = new Set();
+  for (const h of hits) {
+    const pos = h.tick - barIndex * 32;
+    if (pos < 0 || pos >= 32) continue;
+    (h.instrument === 'snare' ? snare : h.instrument === 'kick' ? kick : new Set()).add(pos);
+  }
+  const has = (set, ...ps) => ps.every((p) => set.has(p));
+  if (has(kick, 0, 16) && has(snare, 8, 24)) return 'rock';
+  if (has(kick, 0, 8, 16, 24)) return 'fourOnFloor';
+  if (has(snare, 8, 24)) return 'backbeat';
+  return null;
+}
+
 // §7 / §10 世界事件允許的 beatInBar（null = 任意拍）
 const WORLD_RULES = {
   'spike-telegraph': [2], 'spike-up': [3], 'spike-down': [0], spawn: [0],
   'bat-telegraph': [2], 'bat-swoop': [3],
   'guard-step': [0, 2], 'guard-telegraph': [2], 'guard-strike': [3],
   'slime-hop': [0, 1, 2, 3],
-  'fever-start': [0], 'fever-end': [0], parry: null, 'enemy-stun': null,
+  'fever-start': [0], 'fever-end': [0], groove: [0], parry: [3], 'enemy-stun': null,
 };
 
 // ---------------------------------------------------------------------------
@@ -418,7 +472,7 @@ export function analyzeRun(data, cfg) {
   const bpm = cfg.bpm;
   const beatDur = 60 / bpm;
   const tickDur = beatDur / 8;
-  const grace = (cfg.lateGraceMs ?? 40) / 1000;
+  const grace = (cfg.lateGraceMs ?? 25) / 1000;
   const subdivision = cfg.subdivision ?? 'auto';
   const expectStep = stepRef(subdivision, bpm);
   const expectJudge = Math.max(4, expectStep);
@@ -552,40 +606,50 @@ export function analyzeRun(data, cfg) {
     else c.check('B2t', 'scheduledAudioTime − ctxNowAtSchedule ≥ 0（非 clamped 攻擊與節拍器）', bad.length === 0, detail, metrics);
   }
 
-  // 3. 以 §3.2 參考實作重算每一擊；tick 嚴格遞增；pending ≤ 3；連段
+  // 3. 以 §3.2 參考實作重算每一擊（每支鼓各自的 minTick 佇列）；tick 於同一支鼓內嚴格遞增；每支鼓 pending ≤ 3；連段；齊奏
   {
     const bad = []; const warn = [];
-    let minTick = -Infinity; let prevTick = -Infinity;
+    const minTickBy = {}; const prevTickBy = {};
     const comboExp = combosRef(attacks);
-    let nMagnet = 0;
+    let nMagnet = 0; let nUnison = 0;
+    const instrOf = (a) => a.instrument || 'kick';
     for (let i = 0; i < attacks.length; i++) {
       const a = attacks[i];
+      const ins = instrOf(a);
+      const minTick = minTickBy[ins] ?? -Infinity;
+      const prevTick = prevTickBy[ins] ?? -Infinity;
       const ref = snapRef({ t: a.inputSongTime, s: a.schedNowSongTime, bpm, subdivision, lateGraceSec: grace, minTick, strict });
       const problems = [];
       if (ref.tick !== a.tick || ref.rule !== a.rule || ref.magnet !== !!a.magnet) {
-        // 邊界（late 40 ms / aimWindow ± 0.02 ms）的浮點差異以 WARN 揭露
+        // 邊界（late grace / aimWindow ± 0.02 ms）的浮點差異以 WARN 揭露
         const edge = Math.min(
           Math.abs((a.inputSongTime - Math.floor(a.inputSongTime / (ref.J * tickDur)) * ref.J * tickDur) - grace),
           Math.abs((Math.ceil(a.inputSongTime / (ref.J * tickDur)) * ref.J * tickDur - a.inputSongTime) - Math.min(0.09, ref.J * tickDur / 2)));
-        const msg = `#${a.id}: input=${f(a.inputSongTime, 4)}s sched=${f(a.schedNowSongTime, 4)}s minTick=${minTick} 遊戲 tick=${a.tick}/${a.rule}/magnet=${a.magnet}，參考 tick=${ref.tick}/${ref.rule}/magnet=${ref.magnet}`;
+        const msg = `#${a.id}[${ins}]: input=${f(a.inputSongTime, 4)}s sched=${f(a.schedNowSongTime, 4)}s minTick=${minTick} 遊戲 tick=${a.tick}/${a.rule}/magnet=${a.magnet}，參考 tick=${ref.tick}/${ref.rule}/magnet=${ref.magnet}`;
         (edge < 2e-5 ? warn : bad).push(msg);
       }
       if (ref.judgment !== a.judgment) problems.push(`judgment=${a.judgment} 參考=${ref.judgment}`);
       if (a.magnet) nMagnet++;
-      if (a.minTick !== undefined && a.minTick !== null && a.minTick !== minTick && Number.isFinite(minTick)) problems.push(`log.minTick=${a.minTick} 應為 ${minTick}`);
-      if (!(a.tick > prevTick)) problems.push(`tick ${a.tick} 未嚴格遞增(前一個 ${prevTick})`);
+      if (a.minTick !== undefined && a.minTick !== null && a.minTick !== minTick && Number.isFinite(minTick)) problems.push(`log.minTick=${a.minTick} 應為 ${minTick}（${ins} 佇列）`);
+      if (!(a.tick > prevTick)) problems.push(`${ins} 的 tick ${a.tick} 未嚴格遞增(前一個 ${prevTick})`);
       let pending = 0;
-      for (let j = 0; j < i; j++) if (attacks[j].connectSongTime > a.inputSongTime + 0.05) pending++;
-      if (pending >= 3) problems.push(`輸入當下已有 ${pending} 個未命中攻擊（上限 3，新的不應被接受）`);
+      for (let j = 0; j < i; j++) if (instrOf(attacks[j]) === ins && attacks[j].connectSongTime > a.inputSongTime + 0.05) pending++;
+      if (pending >= 3) problems.push(`輸入當下 ${ins} 已有 ${pending} 個未命中攻擊（每支鼓上限 3，新的不應被接受）`);
       if ((a.combo ?? null) !== comboExp[i]) problems.push(`combo=${a.combo} 參考=${comboExp[i]}`);
+      // 齊奏：另一支鼓有相同 tick → 兩筆都應 unison=true
+      const expUnison = attacks.some((o, j) => j !== i && instrOf(o) !== ins && o.tick === a.tick);
+      if (a.unison !== undefined && !!a.unison !== expUnison) problems.push(`unison=${a.unison} 參考=${expUnison}`);
+      if (a.unison === undefined) problems.push('缺少 unison 欄位');
+      if (expUnison) nUnison++;
+      if (a.instrument !== undefined && !['kick', 'snare'].includes(a.instrument)) problems.push(`未知 instrument=${a.instrument}`);
       if (problems.length) bad.push(`#${a.id}: ${problems.join(', ')}`);
-      prevTick = a.tick;
-      minTick = Math.max(minTick, a.tick + 1);
+      prevTickBy[ins] = a.tick;
+      minTickBy[ins] = Math.max(minTick, a.tick + 1);
     }
     const nCombo = comboExp.filter(Boolean).length;
-    c.check('B3', 'tick/rule/magnet/judgment 與 §3.2 參考實作逐筆一致（含 minTick 佇列、嚴格遞增、≤3 pending、連段偵測）', attacks.length > 0 && bad.length === 0,
-      `${attacks.length} 次攻擊逐一比對${bad.length ? '；' + firstN(bad) : '，全部一致'}；magnet ${nMagnet} 次；連段 ${nCombo} 次（${['eighth', 'bar', 'fill'].map((k) => `${k}=${comboExp.filter((x) => x === k).length}`).join(' ')}）${warn.length ? `；另有 ${warn.length} 筆落在邊界 ±0.02ms，略過` : ''}`,
-      { nMagnet, nCombo });
+    c.check('B3', 'tick/rule/magnet/judgment 與 §3.2 參考實作逐筆一致（新磁吸上限 max(0.2s, 0.35 拍)、每支鼓獨立 minTick 佇列、各自嚴格遞增、各 ≤3 pending、連段偵測、齊奏旗標）', attacks.length > 0 && bad.length === 0,
+      `${attacks.length} 次攻擊逐一比對${bad.length ? '；' + firstN(bad) : '，全部一致'}；magnet ${nMagnet} 次；連段 ${nCombo} 次（${['eighth', 'bar', 'fill'].map((k) => `${k}=${comboExp.filter((x) => x === k).length}`).join(' ')}）；齊奏攻擊 ${nUnison} 筆${warn.length ? `；另有 ${warn.length} 筆落在邊界 ±0.02ms，略過` : ''}`,
+      { nMagnet, nCombo, nUnison });
   }
 
   // 4. impact 時機
@@ -653,12 +717,15 @@ export function analyzeRun(data, cfg) {
         if (rule && !rule.includes(w.beatInBar)) problems.push(`${w.kind} 出現在 beatInBar ${w.beatInBar}（允許 ${rule.join('/')}）`);
         if (Math.abs(w.beatSongTime - w.beatIndex * beatDur) > 1e-6) problems.push(`beatSongTime 不是 beatIndex×beatDur`);
         const lag = w.firedSongTime - w.beatSongTime;
+        // 招架在出招拍 + lateGrace 才結算（Sonnet-Stage 的敵人邏輯）：延遲容許 lateGrace + 40 ms
+        const lagLim = (w.kind === 'parry' || w.kind === 'enemy-stun') ? LAG + grace : LAG;
         lags.push(lag);
-        if (!(lag >= -1e-6 && lag <= LAG)) problems.push(`延遲 ${ms(lag)}ms 不在 [0,40ms]`);
+        if (!(lag >= -1e-6 && lag <= lagLim)) problems.push(`延遲 ${ms(lag)}ms 不在 [0,${ms(lagLim, 0)}ms]`);
+        if (w.kind === 'groove' && (!w.pattern && !w.name)) problems.push('groove 缺少節奏型名稱');
         if (problems.length) bad.push(`${w.kind}#${w.entityId}@beat${w.beatIndex}: ${problems.join(', ')}`);
       }
       const st = stats(lags);
-      c.check('B6', '世界事件只在規定拍點觸發（fever 只在 beatInBar 0；parry / enemy-stun 任意拍）、延遲 ≤ 40 ms', bad.length === 0,
+      c.check('B6', '世界事件只在規定拍點觸發（fever / groove 只在 beatInBar 0；parry 在出招拍 beatInBar 3；enemy-stun 任意拍）、延遲 ≤ 40 ms（parry/stun ≤ 40 ms + lateGrace）', bad.length === 0,
         `n=${world.length}，延遲 max=${ms(st.max)} ms；各類：${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}${bad.length ? '；' + firstN(bad) : ''}`,
         { counts, lagMaxMs: st.max * 1000 });
       if (unknown.size) c.add('B6u', '未知的世界事件種類', 'WARN', [...unknown].join(', '));
@@ -685,7 +752,39 @@ export function analyzeRun(data, cfg) {
       for (const w of parries) {
         if (!attacks.some((a) => a.tick === w.beatIndex * 8)) pbad.push(`parry@beat${w.beatIndex}: 沒有 tick=${w.beatIndex * 8} 的攻擊`);
       }
-      c.check('B6p', '招架只在有攻擊 tick 等於敵人出招 tick 時發生', pbad.length === 0, `parry=${parries.length}${pbad.length ? '；' + firstN(pbad) : ''}`);
+      // 一次攻擊可同時招架多隻敵人（設計允許），因此不比較 parry 事件數與被招架攻擊數
+      c.check('B6p', '招架只在有攻擊 tick 等於敵人出招 tick 時發生（一擊可招架多敵）', pbad.length === 0, `parry=${parries.length}（出招拍 beatInBar 3，延遲上限 ${ms(LAG + grace, 0)} ms）${pbad.length ? '；' + firstN(pbad) : ''}`);
+
+      // 6g. groove：每個 groove 事件與獨立再實作一致，且每個達成節奏型的小節都有事件
+      const gEvents = world.filter((w) => w.kind === 'groove');
+      const beatSet = new Set(beats.map((b) => b.beatIndex));
+      const byBar = new Map();
+      for (const a of attacks) {
+        const bar = Math.floor(a.tick / 32);
+        if (!byBar.has(bar)) byBar.set(bar, []);
+        byBar.get(bar).push({ tick: a.tick, instrument: a.instrument || 'kick' });
+      }
+      const gbad = []; const expectedBars = []; const seenPatterns = {};
+      for (const [bar, hits] of byBar) {
+        const id = grooveRef(hits, bar);
+        const downbeat = (bar + 1) * 4;
+        if (!beatSet.has(downbeat)) continue; // 下一個強拍事件不在 log 內（結尾）
+        const ev = gEvents.filter((w) => w.beatIndex === downbeat);
+        if (id) {
+          expectedBars.push(bar);
+          if (ev.length !== 1) gbad.push(`小節 ${bar} 應有 groove=${id}，實際事件 ${ev.length} 個`);
+          else if ((ev[0].pattern || ev[0].entityId) !== id) gbad.push(`小節 ${bar}: 事件=${ev[0].pattern || ev[0].entityId} 參考=${id}`);
+          else seenPatterns[id] = (seenPatterns[id] || 0) + 1;
+        } else if (ev.length) gbad.push(`小節 ${bar} 不應有 groove，卻有 ${ev[0].pattern || ev[0].entityId}`);
+      }
+      for (const w of gEvents) {
+        const bar = w.beatIndex / 4 - 1;
+        if (!Number.isInteger(bar) || !byBar.has(bar)) gbad.push(`groove@beat${w.beatIndex}: 上一小節沒有任何攻擊`);
+      }
+      c.check('B6g', '鼓手 groove：事件與獨立再實作（搖滾 / 四拍大鼓 / 反拍，rock > floor > backbeat）逐小節一致', gbad.length === 0,
+        `groove 事件 ${gEvents.length} 個（${Object.entries(seenPatterns).map(([k, v]) => `${k}=${v}`).join(' ') || '無'}），預期達成的小節 ${expectedBars.length} 個${gbad.length ? '；' + firstN(gbad) : ''}`,
+        { events: gEvents.length, expected: expectedBars.length, seenPatterns });
+      if (!gEvents.length && !strict) c.add('B6go', '稽核期間觀察到 groove', 'WARN', '沒有觀察到 groove（機器人應刻意打出搖滾節奏與四拍大鼓）');
     }
   }
 
@@ -732,7 +831,7 @@ const withTimeout = (p, msec, label) => Promise.race([
 ]);
 
 /** 在頁面內等到歌曲時間到達目標網格點才按（以 getState().songTime 計時，誤差約 1–2 ms）。 */
-function pressSequenceInPage({ startGrid, offsetsTicks, jitterMs }) {
+function pressSequenceInPage({ startGrid, offsetsTicks, jitterMs, instruments }) {
   const h = window.__BPM_SLASH_DEBUG__;
   const st0 = h.getState();
   const tickDur = 60 / st0.bpm / 8;
@@ -751,7 +850,7 @@ function pressSequenceInPage({ startGrid, offsetsTicks, jitterMs }) {
     for (let i = 0; i < offsetsTicks.length; i++) {
       const target = base + offsetsTicks[i] * tickDur + (jitterMs[i] || 0) / 1000;
       await waitUntil(target);
-      const e = h.pressAttack();
+      const e = h.pressAttack((instruments && instruments[i]) || 'kick');
       pressed.push(e ? e.id : null);
     }
     return pressed;
@@ -785,7 +884,7 @@ async function runConfig(browser, baseUrl, cfg, opts) {
 
     await call('setInvincible', true);
     await call('clearLogs');
-    await withTimeout(call('start', { bpm: cfg.bpm, subdivision: cfg.subdivision ?? 'auto', lateGraceMs: cfg.lateGraceMs ?? 40 }), 30000, 'start()');
+    await withTimeout(call('start', { bpm: cfg.bpm, subdivision: cfg.subdivision ?? 'auto', lateGraceMs: cfg.lateGraceMs ?? 25 }), 30000, 'start()');
     const beatDur = 60 / cfg.bpm;
 
     // 等待進入 playing
@@ -809,30 +908,45 @@ async function runConfig(browser, baseUrl, cfg, opts) {
     const note = (k, n = 1) => { kinds[k] = (kinds[k] || 0) + n; };
     const S = Math.max(1, cfg.expectStep || 2);
     const jit = (amp) => (rnd() * 2 - 1) * amp;
-    const seq = async (startGrid, offsetsTicks, amp, tag) => {
+    const K = 'kick'; const SN = 'snare';
+    const seq = async (startGrid, offsetsTicks, amp, tag, instruments = null) => {
       const jitterMs = offsetsTicks.map(() => jit(amp));
-      const r = await withTimeout(page.evaluate(pressSequenceInPage, { startGrid, offsetsTicks, jitterMs }), 20000, tag);
+      const r = await withTimeout(page.evaluate(pressSequenceInPage, { startGrid, offsetsTicks, jitterMs, instruments }), 20000, tag);
       pressCount += offsetsTicks.length; note(tag, offsetsTicks.length);
       return r;
     };
+    const randInst = () => (rnd() < 0.5 ? K : SN);
+    const pressRandom = async () => {
+      const inst = randInst();
+      if (rnd() < 0.5) await page.keyboard.press(inst === SN ? 'k' : (rnd() < 0.5 ? 'j' : 'Space')); else await call('pressAttack', inst);
+    };
+    // 開場刻意打出：搖滾節奏 → 四拍大鼓 → 齊奏小節 → 反拍；之後隨機混合（雙鍵）
+    const script = ['rock', 'floor', 'unison', 'backbeat'];
+    let iter = 0;
     while (Date.now() < deadline) {
       const r = rnd();
-      if (r < 0.28) { // 準拍單擊（後拍 / 十六分 / 正拍），含輕微抖動
+      const pick = iter < script.length ? script[iter] : null;
+      iter++;
+      if (pick === 'rock' || (!pick && r < 0.12)) { await seq(32, [0, 8, 16, 24], 12, 'rock-beat', [K, SN, K, SN]); }
+      else if (pick === 'floor' || (!pick && r < 0.22)) { await seq(32, [0, 8, 16, 24], 12, 'four-on-floor', [K, K, K, K]); }
+      else if (pick === 'unison' || (!pick && r < 0.32)) { await seq(8, [0, 0, 8, 8, 16, 16], 6, 'unison', [K, SN, SN, K, K, SN]); }
+      else if (pick === 'backbeat' || (!pick && r < 0.38)) { await seq(32, [8, 24], 12, 'backbeat', [SN, SN]); }
+      else if (!pick && r < 0.52) { // 準拍單擊（後拍 / 十六分 / 正拍），含輕微抖動，隨機鼓
         const g = [4, 8, 2, 16][Math.floor(rnd() * 4)];
-        await seq(g, [0], 30, 'on-beat');
-      } else if (r < 0.45) { // 隨機離拍單擊
+        await seq(g, [0], 30, 'on-beat', [randInst()]);
+      } else if (!pick && r < 0.64) { // 隨機離拍單擊（鍵盤 J / Space / K 或除錯掛鉤）
         pressCount++; note('random');
-        if (rnd() < 0.5) await page.keyboard.press('j'); else await call('pressAttack');
-      } else if (r < 0.60) { // 連打
+        await pressRandom();
+      } else if (!pick && r < 0.76) { // 連打（兩支鼓混合）
         const n = 3 + Math.floor(rnd() * 3);
         for (let i = 0; i < n && Date.now() < deadline; i++) {
           pressCount++; note('burst');
-          if (rnd() < 0.5) await page.keyboard.press('j'); else await call('pressAttack');
+          await pressRandom();
           await sleep(25 + rnd() * 65);
         }
-      } else if (r < 0.75) { await seq(32, [0, 8, 16, 24], 12, 'bar-run'); }
-      else if (r < 0.88) { await seq(8, [0, 4, 8, 12], 12, 'eighth-run'); }
-      else { await seq(32, [-3 * S, -2 * S, -S, 0], 8, 'fill-mash'); }
+      } else if (!pick && r < 0.86) { await seq(32, [0, 8, 16, 24], 12, 'bar-run', [K, K, K, K]); }
+      else if (!pick && r < 0.93) { await seq(8, [0, 4, 8, 12], 12, 'eighth-run', [K, K, K, K]); }
+      else { await seq(32, [-3 * S, -2 * S, -S, 0], 8, 'fill-mash', [K, SN, K, SN]); }
       await sleep(120 + rnd() * 500);
     }
     // 等最後的攻擊命中
@@ -871,27 +985,43 @@ async function renderHitsInPage({ baseUrl }) {
   const mod = await import(new URL('js/audio/sfxVoices.js', baseUrl).href);
   const { SfxVoices } = mod;
   const LEVELS = mod.HIT_LEVELS || ['bar', 'half', 'beat', 'eighth', 'sixteenth', 'thirtysecond'];
+  const INSTRUMENTS = mod.HIT_INSTRUMENTS || null; // v3；缺少時退回單一（預設大鼓）樂器
+  const insts = INSTRUMENTS || ['kick'];
   const SR = 44100;
   const variants = [];
-  for (const level of LEVELS) for (const onBeat of [true, false]) variants.push({ name: `${level}/${onBeat ? 'on' : 'off'}`, desc: { level, onBeat, fever: false, combo: null, parry: false } });
-  variants.push({ name: 'combo-fill', desc: { level: 'bar', onBeat: true, fever: false, combo: 'fill', parry: false } });
-  variants.push({ name: 'combo-bar', desc: { level: 'beat', onBeat: true, fever: false, combo: 'bar', parry: false } });
-  variants.push({ name: 'combo-eighth', desc: { level: 'eighth', onBeat: true, fever: false, combo: 'eighth', parry: false } });
-  variants.push({ name: 'parry', desc: { level: 'beat', onBeat: true, fever: false, combo: null, parry: true } });
-  variants.push({ name: 'fever/beat', desc: { level: 'beat', onBeat: false, fever: true, combo: null, parry: false } });
+  const d = (inst, o) => ({ ...(INSTRUMENTS ? { instrument: inst } : {}), level: 'beat', onBeat: true, fever: false, combo: null, parry: false, ...o });
+  for (const inst of insts) {
+    for (const level of LEVELS) for (const onBeat of [true, false]) variants.push({ name: `${inst}:${level}/${onBeat ? 'on' : 'off'}`, desc: d(inst, { level, onBeat }) });
+    variants.push({ name: `${inst}:combo-fill`, desc: d(inst, { level: 'bar', combo: 'fill' }) });
+    variants.push({ name: `${inst}:combo-bar`, desc: d(inst, { level: 'beat', combo: 'bar' }) });
+    variants.push({ name: `${inst}:combo-eighth`, desc: d(inst, { level: 'eighth', combo: 'eighth' }) });
+    variants.push({ name: `${inst}:combo-unison`, desc: d(inst, { level: 'beat', combo: 'unison' }) });
+    variants.push({ name: `${inst}:parry`, desc: d(inst, { parry: true }) });
+    variants.push({ name: `${inst}:fever/beat`, desc: d(inst, { onBeat: false, fever: true }) });
+  }
   variants.push({ name: 'click-accent', click: true, accent: true });
   variants.push({ name: 'click-normal', click: true, accent: false });
+  // 柔和起音的反應音（confirm 類）：只檢查前 10 ms RMS 低於其取樣峰值的 30%
+  const softNames = [['confirmHit', (v, t) => v.confirmHit(t, false)], ['confirmHit-big', (v, t) => v.confirmHit(t, true)],
+    ['confirmBlock', (v, t) => v.confirmBlock(t)], ['confirmKill', (v, t) => v.confirmKill(t)], ['confirmParry', (v, t) => v.confirmParry(t)], ['hurt', (v, t) => v.hurt(t)]];
+  const softAvail = [];
+  const probe = new OfflineAudioContext(1, 4410, SR);
+  const probeV = new SfxVoices(probe, { sfx: probe.destination, click: probe.destination });
+  for (const [n, fn] of softNames) {
+    const method = n.split('-')[0];
+    if (typeof probeV[method] === 'function') { variants.push({ name: `soft:${n}`, soft: true, fn }); softAvail.push(n); }
+  }
   const out = [];
   for (let i = 0; i < variants.length; i++) {
     const v = variants[i];
     const t = 0.1 + 0.00037 * (i + 1);
     const off = new OfflineAudioContext(1, Math.ceil(SR * (t + 1.0)), SR);
     const voices = new SfxVoices(off, { sfx: off.destination, click: off.destination });
-    if (v.click) voices.click(t, v.accent); else voices.hit(v.desc, t);
+    if (v.click) voices.click(t, v.accent); else if (v.soft) v.fn(voices, t); else voices.hit(v.desc, t);
     const buf = await off.startRendering();
-    out.push({ name: v.name, t, samples: Array.from(buf.getChannelData(0)) });
+    out.push({ name: v.name, t, soft: !!v.soft, samples: Array.from(buf.getChannelData(0)) });
   }
-  return { sr: SR, levels: LEVELS, items: out };
+  return { sr: SR, levels: LEVELS, instruments: INSTRUMENTS, softAvail, items: out };
 }
 
 /** B9b：預設曲 + 節拍器（beat0 = 0）。回傳 mix 與純音樂兩份渲染（click = mix − music）。 */
@@ -952,40 +1082,67 @@ async function runOfflineAudit(browser, baseUrl) {
       checks.push({ id: 'B9', name: 'SfxVoices#hit 離線渲染', status: 'FAIL', detail: `渲染失敗：${e.message}（sfxVoices.js 是否已提供 hit() 與 HIT_LEVELS？）` });
     }
     if (r) {
-      const rows = r.items.map((e) => {
+      const hitItems = r.items.filter((e) => !e.soft);
+      const rows = hitItems.map((e) => {
         const on = detectOnset(e.samples, r.sr, e.t);
         return { name: e.name, errMs: (on - e.t) * 1000, rms: rmsFrom(e.samples, r.sr, e.t) };
       });
       const bad = rows.filter((x) => !(Math.abs(x.errMs) <= 2));
+      const insts = r.instruments || ['kick'];
       checks.push({
-        id: 'B9', name: 'OfflineAudioContext 渲染：SfxVoices#hit 每個 level×{onBeat,off}、連段 fill/bar/eighth、招架、狂熱與節拍器 click 的真實 onset 與排定時間差 ≤ 2 ms（10% 峰值偵測）',
+        id: 'B9', name: `OfflineAudioContext 渲染：SfxVoices#hit ${r.instruments ? '樂器 × ' : ''}level × {onBeat,off}、連段 fill/bar/eighth/unison、招架、狂熱與節拍器 click 的真實 onset 與排定時間差 ≤ 2 ms（10% 峰值偵測）`,
         status: bad.length === 0 ? 'PASS' : 'FAIL',
-        detail: rows.map((x) => `${x.name}=${f(x.errMs, 3)}ms`).join('  ') + (bad.length ? `；超標：${bad.map((x) => x.name).join(',')}` : ''),
+        detail: `${rows.length} 個變體（樂器：${r.instruments ? insts.join('/') : '無 HIT_INSTRUMENTS，僅單一樂器'}）；最大 |誤差| ${f(Math.max(...rows.map((x) => Math.abs(x.errMs))), 3)} ms；` + rows.map((x) => `${x.name}=${f(x.errMs, 3)}`).join(' ') + (bad.length ? `；超標：${bad.map((x) => x.name).join(',')}` : ''),
         metrics: { onsetErrMs: Object.fromEntries(rows.map((x) => [x.name, x.errMs])) },
       });
 
-      // B10：響度順序（§4）
+      // B10：響度順序（§4），每支樂器各自檢查
       const rms = Object.fromEntries(rows.map((x) => [x.name, x.rms]));
       const order = ['bar', 'half', 'beat', 'eighth', 'sixteenth', 'thirtysecond'];
       const problems = [];
-      for (const side of ['on', 'off']) {
-        for (let i = 0; i + 1 < order.length; i++) {
-          const hi = rms[`${order[i]}/${side}`]; const lo = rms[`${order[i + 1]}/${side}`];
-          const halfBeat = order[i] === 'half' && order[i + 1] === 'beat';
-          const ok = halfBeat ? hi >= lo * 0.95 : hi > lo * 1.02;
-          if (!ok) problems.push(`${order[i]}/${side}(${f(hi, 4)}) ${halfBeat ? '≥' : '>'} ${order[i + 1]}/${side}(${f(lo, 4)}) 不成立`);
+      for (const inst of insts) {
+        for (const side of ['on', 'off']) {
+          for (let i = 0; i + 1 < order.length; i++) {
+            const hi = rms[`${inst}:${order[i]}/${side}`]; const lo = rms[`${inst}:${order[i + 1]}/${side}`];
+            const halfBeat = order[i] === 'half' && order[i + 1] === 'beat';
+            const ok = halfBeat ? hi >= lo * 0.95 : hi > lo * 1.02;
+            if (!ok) problems.push(`${inst}:${order[i]}/${side}(${f(hi, 4)}) ${halfBeat ? '≥' : '>'} ${order[i + 1]}/${side}(${f(lo, 4)}) 不成立`);
+          }
+        }
+        for (const lv of order) {
+          const on = rms[`${inst}:${lv}/on`]; const off = rms[`${inst}:${lv}/off`];
+          if (!(on > off)) problems.push(`${inst}:${lv}: onBeat(${f(on, 4)}) 應大於 off(${f(off, 4)})`);
         }
       }
-      for (const lv of order) {
-        const on = rms[`${lv}/on`]; const off = rms[`${lv}/off`];
-        if (!(on > off)) problems.push(`${lv}: onBeat(${f(on, 4)}) 應大於 off(${f(off, 4)})`);
-      }
       checks.push({
-        id: 'B10', name: '響度順序（前 60 ms RMS）：bar > half ≥ beat > eighth > sixteenth > thirtysecond（half≥beat 容許 5%），且每個 level onBeat > off',
+        id: 'B10', name: '響度順序（前 60 ms RMS，每支樂器各自）：bar > half ≥ beat > eighth > sixteenth > thirtysecond（half≥beat 容許 5%），且每個 level onBeat > off',
         status: problems.length === 0 ? 'PASS' : 'FAIL',
-        detail: `onBeat：${order.map((l) => `${l}=${f(rms[`${l}/on`], 4)}`).join(' ')}；off：${order.map((l) => `${l}=${f(rms[`${l}/off`], 4)}`).join(' ')}${problems.length ? '；' + firstN(problems, 5) : ''}`,
+        detail: insts.map((inst) => `${inst} onBeat：${order.map((l) => `${l}=${f(rms[`${inst}:${l}/on`], 4)}`).join(' ')}；off：${order.map((l) => `${l}=${f(rms[`${inst}:${l}/off`], 4)}`).join(' ')}`).join(' ｜ ') + (problems.length ? '；' + firstN(problems, 5) : ''),
         metrics: { rms },
       });
+
+      // B10s：柔和起音（confirm 類 / hurt）
+      const softItems = r.items.filter((e) => e.soft);
+      if (!softItems.length) {
+        checks.push({ id: 'B10s', name: '反應音柔和起音（confirm 類：前 10 ms RMS < 取樣峰值的 30%）', status: 'SKIPPED', detail: 'sfxVoices 沒有匯出 confirm 類語音' });
+      } else {
+        const win = Math.round(0.010 * r.sr);
+        const rows2 = softItems.map((e) => {
+          const x = e.samples; const i0 = Math.floor(e.t * r.sr);
+          const rmsAt = (st) => { let sum = 0; for (let k = 0; k < win; k++) { const v = x[st + k] || 0; sum += v * v; } return Math.sqrt(sum / win); };
+          const first = rmsAt(i0);
+          let peak = 0; // 取樣峰值（|x| 最大值）
+          for (let k = i0; k < Math.min(x.length, i0 + Math.round(0.8 * r.sr)); k++) peak = Math.max(peak, Math.abs(x[k]));
+          return { name: e.name.replace('soft:', ''), ratio: peak > 1e-6 ? first / peak : NaN, peak };
+        });
+        const sbad = rows2.filter((x) => !(x.ratio < 0.3));
+        checks.push({
+          id: 'B10s', name: '反應音柔和起音（confirm 類 / hurt：前 10 ms RMS < 取樣峰值的 30%）',
+          status: sbad.length === 0 ? 'PASS' : 'FAIL',
+          detail: rows2.map((x) => `${x.name}=${f(x.ratio * 100, 1)}%`).join(' ') + (sbad.length ? `；超標：${sbad.map((x) => x.name).join(',')}` : ''),
+          metrics: { softRatio: Object.fromEntries(rows2.map((x) => [x.name, x.ratio])) },
+        });
+      }
     }
     // B9b
     const bpm = 88;
@@ -1034,7 +1191,7 @@ async function runBrowserPart(opts, baseUrl) {
     for (const cfg of matrix.filter((c) => !opts.only || opts.only.includes(c.bpm))) {
       // 慢速曲（40 BPM）縮減小節數，但至少 2 小節；窗口上限約 24 秒
       const bars = Math.max(2, Math.min(opts.bars, Math.floor(24 / (4 * 60 / cfg.bpm))));
-      const lg = cfg.lateGraceMs ?? 40;
+      const lg = cfg.lateGraceMs ?? 25;
       const full = { subdivision: 'auto', ...cfg, lateGraceMs: lg };
       full.expectStep = stepRef(full.subdivision, full.bpm);
       console.error(`… 執行 bpm=${full.bpm} subdivision=${full.subdivision}（stepTicks ${full.expectStep}）lateGraceMs=${lg}（${bars} 小節，約 ${Math.round(bars * 4 * 60 / cfg.bpm + 4 * 60 / cfg.bpm + 4)} 秒）`);
@@ -1067,7 +1224,7 @@ async function main() {
   console.log('==================== BPM Slash 節奏對拍稽核 ====================');
 
   // Part A
-  console.log('\n## Part A：預設曲 WAV 離線分析');
+  console.log('\n## Part A：背景音樂（預設為去鼓伴奏）WAV 離線分析');
   if (opts.skipWav) {
     console.log('  [SKIPPED] 使用 --skip-wav');
     full.parts.wav = { status: 'SKIPPED', reason: '--skip-wav' };
