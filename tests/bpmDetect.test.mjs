@@ -58,7 +58,8 @@ function synthTrack({ bpm, offsetSec, sampleRate, durationSec = 30, hats = true,
 // 無鼓的八分音符貝斯線：每個八分音符一個指數衰減的音（小節內拍點較重），每小節換和弦根音，
 // 小節開頭加一個緩慢衰減的和弦鋪底（小節級能量變化）。八分音符的 onset 強度與拍點接近，
 // 用來重現「只有 8 分音符」造成的倍速（2 倍）誤判。
-function synthBassLine({ bpm, offsetSec, sampleRate, durationSec = 30, seed = 7 }) {
+// accOn / accOff：拍點與八分偏拍的力度。預設為拍點明顯、偏拍很輕的律動（常見的貝斯線）。
+function synthBassLine({ bpm, offsetSec, sampleRate, durationSec = 30, accOn = 1.0, accOff = 0.2 }) {
   const n = Math.floor(durationSec * sampleRate);
   const out = new Float32Array(n);
   const beatDur = 60 / bpm;
@@ -81,7 +82,7 @@ function synthBassLine({ bpm, offsetSec, sampleRate, durationSec = 30, seed = 7 
     const bar = Math.floor(e / 8);
     const slot = e % 8;
     const root = roots[bar % 4] * (slot === 6 && bar % 2 === 1 ? 2 : 1);
-    const amp = slot % 2 === 0 ? 0.6 : 0.42;
+    const amp = slot % 2 === 0 ? accOn : accOff;
     addNote(t, root, amp, 0.12, eighth * 0.95);
   }
   // 小節級鋪底：每小節開頭的和弦（根音 + 三度 + 五度），衰減 1.2 秒
@@ -167,6 +168,11 @@ for (const sampleRate of RATES) {
       assert.ok(od <= 0.015, `offset ${r.offsetSec} vs truth 0.05 (diff ${od.toFixed(4)} s)`);
     });
   }
+  test(`8th-note bass line, uniform velocity, 88 BPM (quarter tempo, not double), ${sampleRate} Hz`, () => {
+    const samples = synthBassLine({ bpm: 88, offsetSec: 0.05, sampleRate, accOn: 0.8, accOff: 0.8 });
+    const r = detectBpm(samples, sampleRate);
+    assert.ok(Math.abs(r.bpm - 88) <= 0.5, `bpm ${r.bpm} vs 88`);
+  });
   test(`16th-note hat-heavy track at 128 BPM (not halved/doubled), ${sampleRate} Hz`, () => {
     const samples = synthSixteenthHats({ bpm: 128, offsetSec: 0.1, sampleRate });
     const r = detectBpm(samples, sampleRate);
