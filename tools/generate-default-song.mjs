@@ -325,23 +325,40 @@ function playBar(bar) {
 }
 
 // ---------- 合成與輸出 ----------
-for (let bar = 0; bar < BARS; bar++) playBar(bar);
+// 單次渲染（PRNG 每次從同一種子開始，輸出可重現）
+function renderMix(drums) {
+  mix = new Float64Array(TOTAL_SAMPLES);
+  rand = mulberry32(SEED);
+  drumsOn = drums;
+  for (let bar = 0; bar < BARS; bar++) playBar(bar);
 
-// 結尾淡出 30 ms，避免截斷爆音
-{
+  // 結尾淡出 30 ms，避免截斷爆音
   const fadeLen = Math.round(0.03 * SR);
   for (let i = 0; i < fadeLen; i++) {
     mix[TOTAL_SAMPLES - 1 - i] *= i / fadeLen;
   }
+  return mix;
 }
 
-// 正規化到峰值 → tanh 軟削波 → 峰值 -1 dBFS
-let peak = 0;
-for (let i = 0; i < TOTAL_SAMPLES; i++) peak = Math.max(peak, Math.abs(mix[i]));
-const norm = Math.tanh(DRIVE);
-const out = new Float64Array(TOTAL_SAMPLES);
-for (let i = 0; i < TOTAL_SAMPLES; i++) {
-  out[i] = (Math.tanh((DRIVE * mix[i]) / peak) / norm) * PEAK;
+function peakOf(x) {
+  let p = 0;
+  for (let i = 0; i < x.length; i++) p = Math.max(p, Math.abs(x[i]));
+  return p;
+}
+
+// 渲染成品取樣（mono、22050 Hz）。
+// 正規化到峰值 → tanh 軟削波 → 峰值 -1 dBFS。
+// drums:false 沿用含鼓版的增益（以含鼓版峰值為除數），讓兩版的響度關係一致。
+export function renderSong({ drums = true } = {}) {
+  const fullMix = renderMix(true);
+  const peak = peakOf(fullMix);
+  const src = drums ? fullMix : renderMix(false);
+  const norm = Math.tanh(DRIVE);
+  const out = new Float32Array(TOTAL_SAMPLES);
+  for (let i = 0; i < TOTAL_SAMPLES; i++) {
+    out[i] = (Math.tanh((DRIVE * src[i]) / peak) / norm) * PEAK;
+  }
+  return out;
 }
 
 function encodeWav(samples, sampleRate) {
@@ -367,28 +384,35 @@ function encodeWav(samples, sampleRate) {
   return buf;
 }
 
-const meta = {
-  title: '霓虹步伐 Neon Step',
-  bpm: BPM,
-  offsetMs: 0,
-  beatsPerBar: BEATS_PER_BAR,
-  bars: BARS,
-  durationSec: TOTAL_BEATS * 60 / BPM,
-  sampleRate: SR,
-  // 人工標註的段落（小節為單位，endBar 不含）；遊戲優先採用（DESIGN-BEATSNAP §8）
-  sections: [
-    { startBar: 0, endBar: 4, intensity: 'low', name: 'intro' },
-    { startBar: 4, endBar: 12, intensity: 'mid', name: 'verse' },
-    { startBar: 12, endBar: 20, intensity: 'high', name: 'chorus' },
-    { startBar: 20, endBar: 24, intensity: 'low', name: 'breakdown' },
-    { startBar: 24, endBar: 32, intensity: 'high', name: 'final' },
-  ],
-};
+// 僅在直接執行時寫檔（import 時不產生任何副作用）
+const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  const out = renderSong({ drums: false });
 
-mkdirSync(OUT_DIR, { recursive: true });
-writeFileSync(WAV_PATH, encodeWav(out, SR));
-writeFileSync(JSON_PATH, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+  const meta = {
+    title: '霓虹步伐 Neon Step（去鼓伴奏版）',
+    bpm: BPM,
+    offsetMs: 0,
+    beatsPerBar: BEATS_PER_BAR,
+    bars: BARS,
+    durationSec: TOTAL_BEATS * 60 / BPM,
+    sampleRate: SR,
+    drums: false,
+    // 人工標註的段落（小節為單位，endBar 不含）；遊戲優先採用（DESIGN-BEATSNAP §8）
+    sections: [
+      { startBar: 0, endBar: 4, intensity: 'low', name: 'intro' },
+      { startBar: 4, endBar: 12, intensity: 'mid', name: 'verse' },
+      { startBar: 12, endBar: 20, intensity: 'high', name: 'chorus' },
+      { startBar: 20, endBar: 24, intensity: 'low', name: 'breakdown' },
+      { startBar: 24, endBar: 32, intensity: 'high', name: 'final' },
+    ],
+  };
 
-console.log(`wrote ${WAV_PATH}`);
-console.log(`wrote ${JSON_PATH}`);
-console.log(`samples=${TOTAL_SAMPLES} duration=${(TOTAL_SAMPLES / SR).toFixed(6)}s peak=${(PEAK).toFixed(4)}`);
+  mkdirSync(OUT_DIR, { recursive: true });
+  writeFileSync(WAV_PATH, encodeWav(out, SR));
+  writeFileSync(JSON_PATH, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+
+  console.log(`wrote ${WAV_PATH}`);
+  console.log(`wrote ${JSON_PATH}`);
+  console.log(`samples=${TOTAL_SAMPLES} duration=${(TOTAL_SAMPLES / SR).toFixed(6)}s peak=${peakOf(out).toFixed(4)} (drums=false)`);
+}

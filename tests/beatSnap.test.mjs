@@ -111,6 +111,28 @@ test('beat magnet: wait for a strong tick if it is the next grid point and withi
   assert.equal(r3.magnet, false);
 });
 
+test('v3 F2: magnet cap is max(0.2 s, 0.35 * beatDur) so 72.5 BPM magnetizes', () => {
+  // 72.5 bpm: beatDur 0.8276 s, auto S=2 (tickDur 103 ms), c1 - c0 = 207 ms > 0.2 s but <= 0.35 * beatDur = 290 ms.
+  const bpm = 72.5;
+  let found = 0;
+  for (let k = 8; k < 400; k++) {
+    // press so that c0 is the tick just before a beat (k mod 8 == 6) and c1 is that beat
+    if (k % 8 !== 6) continue;
+    const t = time(k, bpm) - 0.12; // earliest = t + 0.05 -> c0 = k (a multiple of S=2)
+    const r = snap(t, bpm, { s: t });
+    if (r.rule === 'snap' && r.tick % 8 === 0 && r.magnet) found++;
+  }
+  assert.ok(found > 0, 'magnet fired at 72.5 bpm');
+  // an explicit tiny cap still cannot go below 0.35 * beatDur; a huge cap widens it
+  const t0 = time(6, 72.5) - 0.12;
+  assert.equal(snap(t0, 72.5, { s: t0, magnetMaxWaitSec: 0.05 }).magnet, true);
+  // fixed quarter grid at 40 bpm: c1 is 1.5 s away > 0.35 * 1.5 = 0.525 s -> no magnet
+  assert.equal(snap(0.5, 40, { subdivision: 1 }).magnet, false);
+  // 120 bpm: cap = max(0.2, 0.175) = 0.2 s
+  const r = snap(0.30, 120);
+  assert.equal(r.magnet, true);
+});
+
 test('snap never goes below schedMinTick and always matches the connect grid', () => {
   for (const bpm of BPMS) {
     const tickDur = 60 / bpm / 8;

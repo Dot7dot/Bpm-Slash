@@ -8,7 +8,7 @@ export const EPS = 1e-9;
 
 export const JUDGE_WINDOWS = Object.freeze({ perfect: 0.045, great: 0.09, good: 0.14 });
 export const JUDGE_MULTIPLIER = Object.freeze({ perfect: 1.5, great: 1.25, good: 0.6, off: 0.4 });
-export const DEFAULT_LATE_GRACE = 0.025;
+export const DEFAULT_LATE_GRACE = 0.04;
 export const DEFAULT_MIN_WINDUP = 0.05;
 export const DEFAULT_MARGIN = 0.005;
 export const DEFAULT_MAGNET_MAX_WAIT = 0.2;
