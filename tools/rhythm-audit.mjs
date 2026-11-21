@@ -8,7 +8,7 @@
 //
 // Part A：離線分析 WAV（onset 對 8 分音符網格的誤差 + 獨立估計 tempo）。
 // Part B：以 Playwright 開啟遊戲，透過 window.__BPM_SLASH_DEBUG__ 驗證
-//         攻擊量化、拍點事件、世界事件、節拍器（DESIGN.md §6 §7 §10 §11）。
+//         BeatSnap 攻擊量化、拍點事件、世界事件、節拍器、鼓組音效（DESIGN-BEATSNAP.md §3–§11 與 DESIGN.md §5 §7）。
 // 結束碼：沒有任何 FAIL 才是 0。
 //
 // 零相依（Playwright 為預先安裝的全域套件，找不到時會 SKIPPED，不會 crash）。
@@ -60,7 +60,7 @@ const HELP = `rhythm-audit：BPM Slash 節奏對拍稽核
   --skip-wav        略過 Part A
   --json <path>     輸出機器可讀的 JSON 報告
   --only <bpm,..>   Part B 只跑指定 BPM 的設定（例：--only 240）
-  --quick           Part B 只跑 88 half、120 half、120 strict
+  --quick           Part B 只跑 88 auto、150 auto、120 strict
   --shots <dir>     每個設定存一張截圖
   --bars <n>        每個設定連按的小節數（預設 4）
   --seed <n>        PRNG 種子
@@ -322,43 +322,93 @@ function analyzeWav(opts) {
 }
 
 // ---------------------------------------------------------------------------
-// Part B：§6.1 量化演算法（獨立再實作）
+// Part B：BeatSnap 演算法（DESIGN-BEATSNAP.md §3.2 的獨立再實作，不 import 遊戲程式碼）
 // ---------------------------------------------------------------------------
-export function quantizeRef({ inputSongTime, bpm, mode = 'half', lateGraceSec = 0.04, minSlotIndex = -Infinity }) {
-  const halfStep = 30 / bpm;
-  const step = mode === 'beat' ? 2 : 1;
-  const fl = Math.floor(inputSongTime / halfStep + 1e-9);
-  const prev = mode === 'beat' ? fl - (((fl % 2) + 2) % 2) : fl;
-  const next = prev + step;
-  let chosen; let late = false;
-  if (inputSongTime - prev * halfStep <= lateGraceSec && prev >= minSlotIndex) { chosen = prev; late = true; } else chosen = next;
-  if (chosen < minSlotIndex) {
-    chosen = mode === 'beat' ? minSlotIndex + (((minSlotIndex % 2) + 2) % 2) : minSlotIndex;
-    late = false;
-  }
-  const slotSongTime = chosen * halfStep;
-  const deltaSec = inputSongTime - slotSongTime;
-  const a = Math.abs(deltaSec);
-  const judgment = a <= 0.045 + 1e-9 ? 'perfect' : a <= 0.09 + 1e-9 ? 'great' : a <= 0.14 + 1e-9 ? 'good' : 'auto';
-  const beatIndex = Math.floor(chosen / 2);
-  const beatInBar = ((beatIndex % 4) + 4) % 4;
-  return { slotIndex: chosen, slotSongTime, half: chosen % 2 === 0 ? 'front' : 'back', beatIndex, beatInBar, isDownbeat: chosen % 2 === 0 && beatInBar === 0, deltaSec, judgment, late };
+const modInt = (a, n) => ((a % n) + n) % n;
+const LEVEL_OF = (k) => (modInt(k, 32) === 0 ? 'bar' : modInt(k, 16) === 0 ? 'half' : modInt(k, 8) === 0 ? 'beat' : modInt(k, 4) === 0 ? 'eighth' : modInt(k, 2) === 0 ? 'sixteenth' : 'thirtysecond');
+const WEIGHT_OF = { bar: 5, half: 4, beat: 3, eighth: 2, sixteenth: 1, thirtysecond: 0 };
+const HALF_OF = { bar: 'front', half: 'front', beat: 'front', eighth: 'back', sixteenth: 'sub', thirtysecond: 'sub' };
+
+/** 自動切分（§3.1）：回傳步長 S（tick）。 */
+export function autoStepRef(bpm) {
+  const beatDur = 60 / bpm;
+  for (const d of [8, 4, 2]) if (beatDur / d >= 0.11 - 1e-9) return 8 / d;
+  return 8;
+}
+export function stepRef(subdivision, bpm) {
+  return [1, 2, 4, 8].includes(Number(subdivision)) ? 8 / Number(subdivision) : autoStepRef(bpm);
 }
 
-quantizeRef.judgmentOf = (delta) => {
-  const a = Math.abs(delta);
-  return a <= 0.045 + 1e-9 ? 'perfect' : a <= 0.09 + 1e-9 ? 'great' : a <= 0.14 + 1e-9 ? 'good' : 'auto';
-};
+export function judgmentOf(deltaSec) {
+  const a = Math.abs(deltaSec) - 1e-9;
+  return a <= 0.045 ? 'perfect' : a <= 0.09 ? 'great' : a <= 0.14 ? 'good' : 'off';
+}
 
-// §7 世界事件允許的 beatInBar
+/** §3.2 參考實作。p: { t, s, bpm, subdivision, lateGraceSec, minTick, strict } */
+export function snapRef({ t, s, bpm, subdivision = 'auto', lateGraceSec = 0.04, minTick = -Infinity, strict = false }) {
+  const tickDur = 60 / bpm / 8;
+  const time = (k) => (k * 60 / bpm) / 8;
+  const S = stepRef(subdivision, bpm);
+  const J = Math.max(4, S);
+  const schedMin = Math.ceil((s + 0.005) / tickDur - 1e-9);
+  const aim = Math.min(0.09, J * tickDur / 2);
+  const pJ = Math.floor(t / (J * tickDur) + 1e-9) * J;
+  const nJ = pJ + J;
+  let tick; let rule; let magnet = false;
+  if (!strict && t - time(pJ) <= lateGraceSec + 1e-9 && pJ >= minTick) { tick = pJ; rule = 'late'; }
+  else if (time(nJ) - t <= aim + 1e-9 && nJ >= minTick && (!strict || nJ >= schedMin)) { tick = nJ; rule = 'aimed'; }
+  else {
+    const earliest = Math.max(t + 0.05, s + 0.005);
+    let c0 = Math.ceil(earliest / tickDur - 1e-9);
+    c0 = Math.max(c0, minTick, schedMin);
+    c0 = Math.ceil(c0 / S) * S;
+    const c1 = c0 + S;
+    if (WEIGHT_OF[LEVEL_OF(c1)] >= 3 && WEIGHT_OF[LEVEL_OF(c1)] > WEIGHT_OF[LEVEL_OF(c0)] && time(c1) - time(c0) <= 0.2 + 1e-9) { tick = c1; magnet = true; }
+    else tick = c0;
+    rule = 'snap';
+  }
+  const a = Math.round(t / (J * tickDur)) * J;
+  const judgeDeltaSec = t - time(a);
+  return { tick, rule, magnet, judgeTick: a, judgeDeltaSec, judgment: judgmentOf(judgeDeltaSec), S, J };
+}
+
+/** 連段參考偵測（§6）：回傳每一擊應有的 combo（null | 'eighth' | 'bar' | 'fill'）。 */
+export function combosRef(attacks) {
+  const out = [];
+  const ticks = new Set();
+  let lastEighth = -Infinity; let run = 0; let runStep = 0; let lastTick = -Infinity;
+  for (const a of attacks) {
+    const s = a.tick;
+    if (run > 0 && s - lastTick === a.stepTicks && runStep === a.stepTicks) run++; else { run = 1; runStep = a.stepTicks; }
+    lastTick = s;
+    ticks.add(s);
+    let bar = false;
+    if (modInt(s, 32) === 24) {
+      const base = s - 24;
+      bar = ticks.has(base) && ticks.has(base + 8) && ticks.has(base + 16);
+      if (bar) for (const v of ticks) if (v >= base && v < s && modInt(v, 8) !== 0) bar = false;
+    }
+    const fill = !bar && run >= 4 && modInt(s, 32) === 0;
+    let eighth = false;
+    if (!bar && !fill && modInt(s, 8) === 4) {
+      const k = s - 12;
+      eighth = k > lastEighth && ticks.has(k) && ticks.has(k + 4) && ticks.has(k + 8);
+    }
+    if (fill) run = 0;
+    if (eighth) lastEighth = s;
+    out.push(bar ? 'bar' : fill ? 'fill' : eighth ? 'eighth' : null);
+  }
+  return out;
+}
+
+// §7 / §10 世界事件允許的 beatInBar（null = 任意拍）
 const WORLD_RULES = {
   'spike-telegraph': [2], 'spike-up': [3], 'spike-down': [0], spawn: [0],
   'bat-telegraph': [2], 'bat-swoop': [3],
   'guard-step': [0, 2], 'guard-telegraph': [2], 'guard-strike': [3],
   'slime-hop': [0, 1, 2, 3],
+  'fever-start': [0], 'fever-end': [0], parry: null, 'enemy-stun': null,
 };
-
-const modInt = (a, n) => ((a % n) + n) % n;
 
 // ---------------------------------------------------------------------------
 // Part B：單一設定的分析（純資料，方便離線測試）
@@ -367,93 +417,112 @@ export function analyzeRun(data, cfg) {
   const c = new Checks();
   const bpm = cfg.bpm;
   const beatDur = 60 / bpm;
-  const halfStep = beatDur / 2;
+  const tickDur = beatDur / 8;
   const grace = (cfg.lateGraceMs ?? 40) / 1000;
+  const subdivision = cfg.subdivision ?? 'auto';
+  const expectStep = stepRef(subdivision, bpm);
+  const expectJudge = Math.max(4, expectStep);
   const { attacks = [], beats = [], world = [], metro = [], state = {}, errors = [] } = data;
   const LAG = 0.040;
   const strict = grace === 0;
+  const outLat = Number.isFinite(state && state.outputLatency) ? state.outputLatency : 0;
 
   // 0. 設定是否生效
   if (state && Number.isFinite(state.bpm)) {
-    c.check('B0', '設定已套用（bpm / 量化模式）', Math.abs(state.bpm - bpm) < 1e-6 && (!state.quantizeMode || state.quantizeMode === cfg.quantizeMode),
-      `state.bpm=${state.bpm}，quantizeMode=${state.quantizeMode}，lateGraceMs=${state.lateGraceMs}`);
+    const stepOk = state.stepTicks === undefined || state.stepTicks === expectStep;
+    c.check('B0', '設定已套用（bpm / 落點切分 / stepTicks）', Math.abs(state.bpm - bpm) < 1e-6 && stepOk && (state.judgeStepTicks === undefined || state.judgeStepTicks === expectJudge),
+      `state.bpm=${state.bpm}，subdivision=${state.subdivision}，stepTicks=${state.stepTicks}（預期 ${expectStep}），judgeStepTicks=${state.judgeStepTicks}（預期 ${expectJudge}），lateGraceMs=${state.lateGraceMs}`);
   }
 
-  // 1. slot 對齊半拍
+  // 1. 網格規則
   {
     const bad = [];
     let maxErr = 0;
+    const ruleCount = {}; const levelCount = {};
     for (const a of attacks) {
-      const err = Math.abs(a.slotSongTime - a.slotIndex * halfStep);
-      const mult = a.slotSongTime / halfStep;
-      const errMult = Math.abs(mult - Math.round(mult)) * halfStep;
-      maxErr = Math.max(maxErr, err, errMult);
       const problems = [];
-      if (!(err < 1e-6) || !(errMult < 1e-6)) problems.push(`slotSongTime 非 halfStep 整數倍(${ms(Math.max(err, errMult), 4)}ms)`);
-      if (!Number.isInteger(a.slotIndex)) problems.push('slotIndex 非整數');
-      if (cfg.quantizeMode === 'beat' && modInt(a.slotIndex, 2) !== 0) problems.push('beat 模式出現奇數 slot');
-      const expHalf = modInt(a.slotIndex, 2) === 0 ? 'front' : 'back';
-      if (a.half !== expHalf) problems.push(`half=${a.half} 應為 ${expHalf}`);
-      const beatIndex = Math.floor(a.slotIndex / 2);
-      const expDown = expHalf === 'front' && modInt(beatIndex, 4) === 0;
-      if (!!a.isDownbeat !== expDown) problems.push(`isDownbeat=${a.isDownbeat} 應為 ${expDown}`);
-      if (problems.length) bad.push(`#${a.id}(slot ${a.slotIndex}): ${problems.join(', ')}`);
+      const err = Math.abs(a.connectSongTime - (a.tick * beatDur) / 8);
+      maxErr = Math.max(maxErr, err);
+      if (!Number.isInteger(a.tick)) problems.push('tick 非整數');
+      if (!(err < 1e-6)) problems.push(`connectSongTime 與 tick×beatDur/8 差 ${ms(err, 4)}ms`);
+      if (a.stepTicks !== expectStep) problems.push(`stepTicks=${a.stepTicks} 應為 ${expectStep}`);
+      if (a.judgeStepTicks !== expectJudge) problems.push(`judgeStepTicks=${a.judgeStepTicks} 應為 ${expectJudge}`);
+      if (a.rule === 'snap' && modInt(a.tick, expectStep) !== 0) problems.push(`snap 的 tick ${a.tick} 不是 stepTicks(${expectStep}) 的倍數`);
+      if ((a.rule === 'late' || a.rule === 'aimed') && modInt(a.tick, expectJudge) !== 0) problems.push(`${a.rule} 的 tick ${a.tick} 不是 judgeStepTicks(${expectJudge}) 的倍數`);
+      if (!['late', 'aimed', 'snap'].includes(a.rule)) problems.push(`未知 rule=${a.rule}`);
+      if (!!a.late !== (a.rule === 'late')) problems.push(`late=${a.late} 與 rule=${a.rule} 不符`);
+      const lv = LEVEL_OF(a.tick);
+      if (a.level !== lv) problems.push(`level=${a.level} 應為 ${lv}`);
+      if (a.weight !== WEIGHT_OF[lv]) problems.push(`weight=${a.weight} 應為 ${WEIGHT_OF[lv]}`);
+      if (a.half !== HALF_OF[lv]) problems.push(`half=${a.half} 應為 ${HALF_OF[lv]}`);
+      if (a.isDownbeat !== undefined && !!a.isDownbeat !== (modInt(a.tick, 32) === 0)) problems.push(`isDownbeat=${a.isDownbeat} 不符`);
+      if (a.beatInBar !== undefined && a.beatInBar !== modInt(Math.floor(a.tick / 8), 4)) problems.push(`beatInBar=${a.beatInBar} 不符`);
+      ruleCount[a.rule] = (ruleCount[a.rule] || 0) + 1;
+      levelCount[lv] = (levelCount[lv] || 0) + 1;
+      if (problems.length) bad.push(`#${a.id}(tick ${a.tick}): ${problems.join(', ')}`);
     }
-    c.check('B1', '攻擊 slot 為半拍整數倍、模式/half/isDownbeat 正確', attacks.length > 0 && bad.length === 0,
-      attacks.length === 0 ? '攻擊 log 為空（沒有任何攻擊被記錄）' : `共 ${attacks.length} 次，最大誤差 ${ms(maxErr, 6)} ms${bad.length ? '；' + firstN(bad) : ''}`);
+    c.check('B1', '網格規則：tick 整數、connect=tick×beatDur/8、snap∈stepTicks 倍數、late/aimed∈judgeStep 倍數、level/half/weight 正確', attacks.length > 0 && bad.length === 0,
+      attacks.length === 0 ? '攻擊 log 為空（沒有任何攻擊被記錄）' : `共 ${attacks.length} 次，最大誤差 ${ms(maxErr, 6)} ms；rule：${Object.entries(ruleCount).map(([k, v]) => `${k}=${v}`).join(' ')}；level：${Object.entries(levelCount).map(([k, v]) => `${k}=${v}`).join(' ')}${bad.length ? '；' + firstN(bad) : ''}`,
+      { ruleCount, levelCount });
   }
 
-  // 2. 排程時間與 late / delta / 判定
+  // 2. 排程時間 / clamping（依 rule 分類）/ 判定
   {
-    const bad = []; const schedErr = []; const clampedErr = [];
-    let nLate = 0; let nClamped = 0; let nNonLate = 0; let nMissingFlag = 0;
-    const outLat = Number.isFinite(state && state.outputLatency) ? state.outputLatency : 0;
+    const bad = []; const schedErr = []; const lateClamped = []; const aimedClamped = [];
+    let nClamped = 0; let nMissingFlag = 0;
     for (const a of attacks) {
       const problems = [];
-      const d = a.inputSongTime - a.slotSongTime;
-      if (Math.abs(a.deltaSec - d) > 1e-6) problems.push(`deltaSec=${ms(a.deltaSec, 3)}ms ≠ input-slot=${ms(d, 3)}ms`);
       const diff = a.scheduledAudioTime - a.expectedAudioTime;
       const hasFlag = typeof a.sfxClamped === 'boolean';
       if (!hasFlag) nMissingFlag++;
-      if (a.late) {
-        nLate++;
-        if (!(a.deltaSec > -1e-9 && a.deltaSec <= grace + 1e-6)) problems.push(`late 但 deltaSec=${ms(a.deltaSec, 3)}ms 不在 (0, ${ms(grace, 1)}ms]`);
-      } else {
-        nNonLate++;
-        if (a.deltaSec > 1e-6) problems.push(`非 late 但 deltaSec=${ms(a.deltaSec, 3)}ms > 0`);
-        if (hasFlag && a.sfxClamped) {
-          nClamped++;
-          clampedErr.push(diff);
-          const lim = outLat + grace + 0.005;
-          if (!(diff >= -1e-9 && diff <= lim)) problems.push(`sfxClamped 但 sched-expected=${ms(diff, 3)}ms 不在 [0, ${ms(lim, 1)}ms]`);
-        } else {
-          const e = Math.abs(diff);
-          schedErr.push(e);
-          if (!(e <= 0.001)) problems.push(`|scheduled-expected|=${ms(e, 3)}ms > 1ms`);
-        }
+      // 判定與 judgeDelta
+      const jd = a.inputSongTime - a.judgeTick * tickDur;
+      if (Math.abs(a.judgeDeltaSec - jd) > 1e-6) problems.push(`judgeDeltaSec=${ms(a.judgeDeltaSec, 3)}ms ≠ input-judgeTick=${ms(jd, 3)}ms`);
+      if (a.judgment !== judgmentOf(a.judgeDeltaSec)) problems.push(`judgment=${a.judgment} 與 |Δ|=${ms(Math.abs(a.judgeDeltaSec), 2)}ms 不符(應為 ${judgmentOf(a.judgeDeltaSec)})`);
+      if (a.onBeat !== (a.judgment === 'perfect' || a.judgment === 'great')) problems.push(`onBeat=${a.onBeat} 與 judgment=${a.judgment} 不符`);
+      const clamped = hasFlag && a.sfxClamped;
+      if (clamped) nClamped++;
+      if (a.rule === 'snap') {
+        if (clamped) problems.push('rule=snap 但 sfxClamped=true');
+        if (!(Math.abs(diff) <= 0.001)) problems.push(`snap：|scheduled-expected|=${ms(Math.abs(diff), 3)}ms > 1ms`);
+        else schedErr.push(Math.abs(diff));
+      } else if (a.rule === 'aimed') {
+        if (clamped) {
+          aimedClamped.push(diff);
+          if (strict) problems.push('嚴格模式 aimed 不得 clamped');
+          else if (!(diff >= -1e-9 && diff <= outLat + grace + 0.005)) problems.push(`aimed clamped 但 sched-expected=${ms(diff, 3)}ms 不在 [0, ${ms(outLat + grace + 0.005, 1)}ms]`);
+        } else if (!(Math.abs(diff) <= 0.001)) problems.push(`aimed：|scheduled-expected|=${ms(Math.abs(diff), 3)}ms > 1ms`);
+        else schedErr.push(Math.abs(diff));
+      } else { // late
+        if (clamped) {
+          lateClamped.push(diff);
+          if (strict) problems.push('嚴格模式不應有 late');
+          else if (!(diff >= -1e-9 && diff <= outLat + grace + 0.005)) problems.push(`late clamped 但 sched-expected=${ms(diff, 3)}ms 不在 [0, ${ms(outLat + grace + 0.005, 1)}ms]`);
+        } else if (!(Math.abs(diff) <= 0.001)) problems.push(`late(未 clamp)：|scheduled-expected|=${ms(Math.abs(diff), 3)}ms > 1ms`);
+        else schedErr.push(Math.abs(diff));
+        if (!(a.inputSongTime - a.connectSongTime > -1e-9 && a.inputSongTime - a.connectSongTime <= grace + 1e-6)) problems.push(`late 但 input-connect=${ms(a.inputSongTime - a.connectSongTime, 3)}ms 不在 (0, ${ms(grace, 1)}ms]`);
       }
-      if (a.judgment !== quantizeRef.judgmentOf(a.deltaSec)) problems.push(`judgment=${a.judgment} 與 |delta|=${ms(Math.abs(a.deltaSec), 2)}ms 不符(應為 ${quantizeRef.judgmentOf(a.deltaSec)})`);
-      if (problems.length) bad.push(`#${a.id}: ${problems.join(', ')}`);
+      if (problems.length) bad.push(`#${a.id}(${a.rule}): ${problems.join(', ')}`);
     }
     const st = stats(schedErr);
-    const clampShare = nNonLate ? nClamped / nNonLate : 0;
-    c.check('B2', '音效排程誤差（未 clamp ≤ 1 ms；clamped ≤ outputLatency+grace+5ms）、late 條件、delta、判定窗口', attacks.length > 0 && bad.length === 0,
-      `未 clamp ${schedErr.length} 次：|scheduled-expected| 平均 ${ms(st.mean, 4)} / max ${ms(st.max, 4)} ms；clamped ${nClamped}/${nNonLate} 次（${(clampShare * 100).toFixed(1)}%），outputLatency=${ms(outLat, 2)} ms；late ${nLate} 次${bad.length ? '；' + firstN(bad) : ''}`,
-      { schedErrMaxMs: st.max * 1000, schedErrMeanMs: st.mean * 1000, nLate, nClamped, clampedShare: clampShare, outputLatencyMs: outLat * 1000 });
-    if (nMissingFlag) c.add('B2f', 'attack log 含 sfxClamped 欄位', 'WARN', `${nMissingFlag} 筆缺少 sfxClamped，以舊規則（≤1 ms）檢查（缺欄位者一律視為未 clamp）`);
-    if (clampShare > 0.25) c.add('B2c', 'sfxClamped 比例偏高', 'WARN', `非 late 攻擊中 ${(clampShare * 100).toFixed(1)}% 被 clamp（> 25%）`);
+    const nAimed = attacks.filter((a) => a.rule === 'aimed').length;
+    c.check('B2', '音效排程：snap/aimed 未 clamp 且 ≤ 1 ms（aimed 的 clamp 僅在非嚴格模式容許並有上限）；late 可 clamp ≤ outputLatency+grace+5ms；判定窗口', attacks.length > 0 && bad.length === 0,
+      `未 clamp ${schedErr.length} 次：|scheduled-expected| 平均 ${ms(st.mean, 4)} / max ${ms(st.max, 4)} ms；late clamped ${lateClamped.length}、aimed clamped ${aimedClamped.length}/${nAimed}（總 clamped ${nClamped}），outputLatency=${ms(outLat, 2)} ms${bad.length ? '；' + firstN(bad) : ''}`,
+      { schedErrMaxMs: st.max * 1000, schedErrMeanMs: st.mean * 1000, lateClamped: lateClamped.length, aimedClamped: aimedClamped.length, nAimed, outputLatencyMs: outLat * 1000 });
+    if (nMissingFlag) c.add('B2f', 'attack log 含 sfxClamped 欄位', 'FAIL', `${nMissingFlag} 筆缺少 sfxClamped`);
+    if (aimedClamped.length) c.add('B2a', 'aimed 攻擊的音效 clamp（§11.3 期望 0）', 'WARN', `${aimedClamped.length}/${nAimed} 筆 aimed 被 clamp（最大 ${ms(Math.max(...aimedClamped), 2)} ms；原因：輸入時間為聽覺域，排程時鐘比輸入晚約 outputLatency）`);
   }
 
-  // 2s. 嚴格模式：不得 clamp、不得 late（§5.2 / §11.8）
+  // 2s. 嚴格模式
   if (strict) {
     const clamped = attacks.filter((a) => a.sfxClamped === true);
     const late = attacks.filter((a) => a.late === true);
-    c.check('B2s', '嚴格模式：sfxClamped 永遠為 false、沒有 late 攻擊', attacks.length > 0 && clamped.length === 0 && late.length === 0,
+    c.check('B2s', '嚴格模式：所有攻擊都不得 clamped、沒有 late 攻擊', attacks.length > 0 && clamped.length === 0 && late.length === 0,
       `攻擊 ${attacks.length} 次，sfxClamped=${clamped.length}，late=${late.length}${clamped.length ? '；' + firstN(clamped.map((a) => '#' + a.id)) : ''}`,
       { attacks: attacks.length, clamped: clamped.length, late: late.length });
   }
 
-  // 2t. 排程領先量：scheduledAudioTime − ctxNowAtSchedule ≥ 0（排在未來 → Web Audio 取樣精準播放）
+  // 2t. 排程領先量
   {
     const leads = []; const bad = []; let missing = 0;
     for (const a of attacks) {
@@ -478,32 +547,40 @@ export function analyzeRun(data, cfg) {
     else c.check('B2t', 'scheduledAudioTime − ctxNowAtSchedule ≥ 0（非 clamped 攻擊與節拍器）', bad.length === 0, detail, metrics);
   }
 
-  // 3. slot 選擇正確性（重跑 §6.1）與佇列
+  // 3. 以 §3.2 參考實作重算每一擊；tick 嚴格遞增；pending ≤ 3；連段
   {
     const bad = []; const warn = [];
-    let minSlot = -Infinity; let prevSlot = -Infinity;
+    let minTick = -Infinity; let prevTick = -Infinity;
+    const comboExp = combosRef(attacks);
+    let nMagnet = 0;
     for (let i = 0; i < attacks.length; i++) {
       const a = attacks[i];
-      const ref = quantizeRef({ inputSongTime: a.inputSongTime, bpm, mode: cfg.quantizeMode, lateGraceSec: grace, minSlotIndex: minSlot });
-      if (strict && a.slotIndex > ref.slotIndex && !a.late) {
-        // 嚴格模式：為了保證音效不被 clamp，slot 可以比純量化結果更晚（§5.2），由 B2s/B2t 驗證其排程。
-      } else if (ref.slotIndex !== a.slotIndex) {
-        const edge = Math.abs((a.inputSongTime - Math.floor(a.inputSongTime / halfStep) * halfStep) - grace);
-        const msg = `#${a.id}: input=${f(a.inputSongTime, 4)}s 遊戲 slot=${a.slotIndex}，參考 slot=${ref.slotIndex}(minSlot=${minSlot})`;
+      const ref = snapRef({ t: a.inputSongTime, s: a.schedNowSongTime, bpm, subdivision, lateGraceSec: grace, minTick, strict });
+      const problems = [];
+      if (ref.tick !== a.tick || ref.rule !== a.rule || ref.magnet !== !!a.magnet) {
+        // 邊界（late 40 ms / aimWindow ± 0.02 ms）的浮點差異以 WARN 揭露
+        const edge = Math.min(
+          Math.abs((a.inputSongTime - Math.floor(a.inputSongTime / (ref.J * tickDur)) * ref.J * tickDur) - grace),
+          Math.abs((Math.ceil(a.inputSongTime / (ref.J * tickDur)) * ref.J * tickDur - a.inputSongTime) - Math.min(0.09, ref.J * tickDur / 2)));
+        const msg = `#${a.id}: input=${f(a.inputSongTime, 4)}s sched=${f(a.schedNowSongTime, 4)}s minTick=${minTick} 遊戲 tick=${a.tick}/${a.rule}/magnet=${a.magnet}，參考 tick=${ref.tick}/${ref.rule}/magnet=${ref.magnet}`;
         (edge < 2e-5 ? warn : bad).push(msg);
-      } else if (ref.late !== !!a.late && Math.abs(a.deltaSec) > 1e-6) {
-        bad.push(`#${a.id}: late=${a.late} 參考=${ref.late}`);
       }
-      if (!(a.slotIndex > prevSlot)) bad.push(`#${a.id}: slot ${a.slotIndex} 未嚴格遞增(前一個 ${prevSlot})`);
-      // 同時未命中的數量（取 slot 時間在輸入之後 50 ms 以上者，避免邊界誤判）
+      if (ref.judgment !== a.judgment) problems.push(`judgment=${a.judgment} 參考=${ref.judgment}`);
+      if (a.magnet) nMagnet++;
+      if (a.minTick !== undefined && a.minTick !== null && a.minTick !== minTick && Number.isFinite(minTick)) problems.push(`log.minTick=${a.minTick} 應為 ${minTick}`);
+      if (!(a.tick > prevTick)) problems.push(`tick ${a.tick} 未嚴格遞增(前一個 ${prevTick})`);
       let pending = 0;
-      for (let j = 0; j < i; j++) if (attacks[j].slotSongTime > a.inputSongTime + 0.05) pending++;
-      if (pending >= 2) bad.push(`#${a.id}: 輸入當下已有 ${pending} 個未命中攻擊（上限 2，含新的應 ≤ 1 個舊的）`);
-      prevSlot = a.slotIndex;
-      minSlot = Math.max(minSlot, a.slotIndex + 1);
+      for (let j = 0; j < i; j++) if (attacks[j].connectSongTime > a.inputSongTime + 0.05) pending++;
+      if (pending >= 3) problems.push(`輸入當下已有 ${pending} 個未命中攻擊（上限 3，新的不應被接受）`);
+      if ((a.combo ?? null) !== comboExp[i]) problems.push(`combo=${a.combo} 參考=${comboExp[i]}`);
+      if (problems.length) bad.push(`#${a.id}: ${problems.join(', ')}`);
+      prevTick = a.tick;
+      minTick = Math.max(minTick, a.tick + 1);
     }
-    c.check('B3', 'slot 選擇符合 §6.1（含 minSlotIndex 佇列、嚴格遞增、同 slot 不重複、≤2 pending）', attacks.length > 0 && bad.length === 0,
-      `${attacks.length} 次攻擊逐一比對${bad.length ? '；' + firstN(bad) : '，全部一致'}${warn.length ? `（另有 ${warn.length} 筆落在 late 邊界 ±0.02ms，略過）` : ''}`);
+    const nCombo = comboExp.filter(Boolean).length;
+    c.check('B3', 'tick/rule/magnet/judgment 與 §3.2 參考實作逐筆一致（含 minTick 佇列、嚴格遞增、≤3 pending、連段偵測）', attacks.length > 0 && bad.length === 0,
+      `${attacks.length} 次攻擊逐一比對${bad.length ? '；' + firstN(bad) : '，全部一致'}；magnet ${nMagnet} 次；連段 ${nCombo} 次（${['eighth', 'bar', 'fill'].map((k) => `${k}=${comboExp.filter((x) => x === k).length}`).join(' ')}）${warn.length ? `；另有 ${warn.length} 筆落在邊界 ±0.02ms，略過` : ''}`,
+      { nMagnet, nCombo });
   }
 
   // 4. impact 時機
@@ -512,23 +589,23 @@ export function analyzeRun(data, cfg) {
     const songNow = Number.isFinite(state.songTime) ? state.songTime : Infinity;
     for (const a of attacks) {
       if (a.impactSongTime == null) {
-        if (a.slotSongTime < songNow - 0.15) bad.push(`#${a.id}: slot ${f(a.slotSongTime, 3)}s 已過但沒有 impactSongTime`);
+        if (a.connectSongTime < songNow - 0.15) bad.push(`#${a.id}: connect ${f(a.connectSongTime, 3)}s 已過但沒有 impactSongTime`);
         else unresolved++;
         continue;
       }
-      const lag = a.impactSongTime - a.slotSongTime;
+      const lag = a.impactSongTime - a.connectSongTime;
       lags.push(lag);
       if (lag > LAG && lag <= LAG + 0.020) hitches.push(`#${a.id}: ${ms(lag)}ms`); // headless 偶發掉幀（≤3 幀）
-      else if (!(lag >= -1e-6 && lag <= LAG)) bad.push(`#${a.id}: impact−slot=${ms(lag)}ms 不在 [0,40ms]`);
+      else if (!(lag >= -1e-6 && lag <= LAG)) bad.push(`#${a.id}: impact−connect=${ms(lag)}ms 不在 [0,40ms]`);
     }
     // 無頭 Chromium 在高 BPM 連打時偶爾掉 2–3 幀（rAF 間隔 33–50 ms，已獨立量測）；容許 ≤ 15% 的攻擊落在 (40,60] ms，並以 WARN 揭露。
     if (hitches.length > Math.max(1, Math.floor(0.15 * lags.length))) bad.push(`掉幀離群值過多：${firstN(hitches)}`);
     const st = stats(lags);
     const within20 = lags.filter((l) => l <= 0.020 + 1e-6).length;
-    c.check('B4', 'impact 延遲 0 ≤ impact−slot ≤ 40 ms（headless 容許）', lags.length > 0 && bad.length === 0,
+    c.check('B4', 'impact 延遲 0 ≤ impact−connect ≤ 40 ms（headless 容許）', lags.length > 0 && bad.length === 0,
       `n=${lags.length}：p50=${ms(st.p50)} p95=${ms(st.p95)} max=${ms(st.max)} ms；≤20ms 者 ${within20}/${lags.length}${unresolved ? `；${unresolved} 筆尚未命中（略過）` : ''}${bad.length ? '；' + firstN(bad) : ''}`,
       { p50Ms: st.p50 * 1000, p95Ms: st.p95 * 1000, maxMs: st.max * 1000, within20ms: within20, n: lags.length });
-    if (hitches.length) c.add('B4h', 'impact 離群值（headless 掉幀）', 'WARN', `${hitches.length} 筆 impact−slot 介於 40–60 ms：${firstN(hitches)}（約 2–3 幀，非邏輯錯誤）`);
+    if (hitches.length) c.add('B4h', 'impact 離群值（headless 掉幀）', 'WARN', `${hitches.length} 筆 impact−connect 介於 40–60 ms：${firstN(hitches)}（約 2–3 幀，非邏輯錯誤）`);
     if (lags.length && st.max > 0.020 + 1e-6 && st.max <= LAG) {
       c.add('B4b', 'impact 延遲 ≤ 20 ms（60 fps 一幀）', 'WARN', `max=${ms(st.max)} ms 超過 1 幀，但在 headless 容許範圍內`);
     } else if (lags.length) c.add('B4b', 'impact 延遲 ≤ 20 ms（60 fps 一幀）', 'PASS', `max=${ms(st.max)} ms`);
@@ -565,10 +642,10 @@ export function analyzeRun(data, cfg) {
       for (const w of world) {
         counts[w.kind] = (counts[w.kind] || 0) + 1;
         const problems = [];
+        if (!(w.kind in WORLD_RULES)) { unknown.add(w.kind); continue; }
         const rule = WORLD_RULES[w.kind];
-        if (!rule) { unknown.add(w.kind); continue; }
         if (modInt(w.beatIndex, 4) !== w.beatInBar) problems.push(`beatInBar=${w.beatInBar} 與 beatIndex=${w.beatIndex} 不一致`);
-        if (!rule.includes(w.beatInBar)) problems.push(`${w.kind} 出現在 beatInBar ${w.beatInBar}（允許 ${rule.join('/')}）`);
+        if (rule && !rule.includes(w.beatInBar)) problems.push(`${w.kind} 出現在 beatInBar ${w.beatInBar}（允許 ${rule.join('/')}）`);
         if (Math.abs(w.beatSongTime - w.beatIndex * beatDur) > 1e-6) problems.push(`beatSongTime 不是 beatIndex×beatDur`);
         const lag = w.firedSongTime - w.beatSongTime;
         lags.push(lag);
@@ -576,11 +653,34 @@ export function analyzeRun(data, cfg) {
         if (problems.length) bad.push(`${w.kind}#${w.entityId}@beat${w.beatIndex}: ${problems.join(', ')}`);
       }
       const st = stats(lags);
-      c.check('B6', '世界事件只在規定拍點觸發、延遲 ≤ 40 ms', bad.length === 0,
+      c.check('B6', '世界事件只在規定拍點觸發（fever 只在 beatInBar 0；parry / enemy-stun 任意拍）、延遲 ≤ 40 ms', bad.length === 0,
         `n=${world.length}，延遲 max=${ms(st.max)} ms；各類：${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}${bad.length ? '；' + firstN(bad) : ''}`,
         { counts, lagMaxMs: st.max * 1000 });
       if (unknown.size) c.add('B6u', '未知的世界事件種類', 'WARN', [...unknown].join(', '));
       if (!counts.spawn) c.add('B6s', '觀察到 spawn 事件', 'WARN', '稽核期間沒有 spawn 事件（無法驗證生怪鎖拍）');
+
+      // 6f. fever 成對：start → end 剛好 8 拍後
+      const fev = world.filter((w) => w.kind === 'fever-start' || w.kind === 'fever-end');
+      const fbad = [];
+      for (let i = 0; i < fev.length; i++) {
+        if (fev[i].kind === 'fever-start') {
+          const nx = fev[i + 1];
+          if (nx) {
+            if (nx.kind !== 'fever-end') fbad.push(`beat ${fev[i].beatIndex}: start 後面不是 end`);
+            else if (nx.beatIndex - fev[i].beatIndex !== 8) fbad.push(`beat ${fev[i].beatIndex}→${nx.beatIndex}: 持續 ${nx.beatIndex - fev[i].beatIndex} 拍（應為 8）`);
+          }
+        } else if (i === 0 || fev[i - 1].kind !== 'fever-start') fbad.push(`beat ${fev[i].beatIndex}: end 沒有對應的 start`);
+      }
+      c.check('B6f', 'fever-start / fever-end 成對、相隔 8 拍、只在小節強拍', fbad.length === 0,
+        `fever-start=${counts['fever-start'] || 0}，fever-end=${counts['fever-end'] || 0}${fbad.length ? '；' + firstN(fbad) : ''}${fev.length === 0 ? '（本輪沒有進入狂熱，僅驗證無誤報）' : ''}`);
+
+      // 6p. 招架只在攻擊 tick == strikeTick（= beatIndex×8）時發生
+      const parries = world.filter((w) => w.kind === 'parry');
+      const pbad = [];
+      for (const w of parries) {
+        if (!attacks.some((a) => a.tick === w.beatIndex * 8)) pbad.push(`parry@beat${w.beatIndex}: 沒有 tick=${w.beatIndex * 8} 的攻擊`);
+      }
+      c.check('B6p', '招架只在有攻擊 tick 等於敵人出招 tick 時發生', pbad.length === 0, `parry=${parries.length}${pbad.length ? '；' + firstN(pbad) : ''}`);
     }
   }
 
@@ -626,6 +726,33 @@ const withTimeout = (p, msec, label) => Promise.race([
   p, new Promise((_, rej) => setTimeout(() => rej(new Error(`逾時(${msec}ms): ${label}`)), msec)),
 ]);
 
+/** 在頁面內等到歌曲時間到達目標網格點才按（以 getState().songTime 計時，誤差約 1–2 ms）。 */
+function pressSequenceInPage({ startGrid, offsetsTicks, jitterMs }) {
+  const h = window.__BPM_SLASH_DEBUG__;
+  const st0 = h.getState();
+  const tickDur = 60 / st0.bpm / 8;
+  const gridDur = startGrid * tickDur;
+  const base = (Math.floor((st0.songTime + 0.18) / gridDur) + 1) * gridDur; // 下一個 startGrid 對齊點，至少 180 ms 之後
+  const waitUntil = (t) => new Promise((resolve) => {
+    const t0 = performance.now();
+    const loop = () => {
+      if (h.getState().songTime >= t || performance.now() - t0 > 4000) resolve();
+      else setTimeout(loop, 1);
+    };
+    loop();
+  });
+  return (async () => {
+    const pressed = [];
+    for (let i = 0; i < offsetsTicks.length; i++) {
+      const target = base + offsetsTicks[i] * tickDur + (jitterMs[i] || 0) / 1000;
+      await waitUntil(target);
+      const e = h.pressAttack();
+      pressed.push(e ? e.id : null);
+    }
+    return pressed;
+  })();
+}
+
 async function runConfig(browser, baseUrl, cfg, opts) {
   const result = { config: cfg, checks: [], data: null, fatal: null };
   const errors = [];
@@ -653,7 +780,7 @@ async function runConfig(browser, baseUrl, cfg, opts) {
 
     await call('setInvincible', true);
     await call('clearLogs');
-    await withTimeout(call('start', { bpm: cfg.bpm, quantizeMode: cfg.quantizeMode, lateGraceMs: cfg.lateGraceMs ?? 40 }), 30000, 'start()');
+    await withTimeout(call('start', { bpm: cfg.bpm, subdivision: cfg.subdivision ?? 'auto', lateGraceMs: cfg.lateGraceMs ?? 40 }), 30000, 'start()');
     const beatDur = 60 / cfg.bpm;
 
     // 等待進入 playing
@@ -668,24 +795,40 @@ async function runConfig(browser, baseUrl, cfg, opts) {
     }
     if (scene !== 'playing') throw new Error(`等不到 playing 場景（最後 scene=${scene}）`);
 
-    // 產生攻擊按鍵（種子 PRNG；真實鍵盤 + pressAttack 交替；含連發）
-    const rnd = mulberry32(opts.seed + Math.round(cfg.bpm * 10) + (cfg.quantizeMode === 'beat' ? 7 : 0));
+    // 機器人：準拍按鍵（用 songTime 對準）、隨機離拍按鍵、連打、整小節四拍 / 八分四連 / 過門連打
+    const rnd = mulberry32(opts.seed + Math.round(cfg.bpm * 10) + (cfg.subdivision === 'auto' || cfg.subdivision === undefined ? 0 : 7 * Number(cfg.subdivision)) + (cfg.lateGraceMs === 0 ? 3 : 0));
     await page.bringToFront().catch(() => {});
     const deadline = Date.now() + opts.bars * 4 * beatDur * 1000;
     let pressCount = 0;
-    const press = async () => {
-      pressCount++;
-      if (rnd() < 0.5) await page.keyboard.press('j');
-      else await call('pressAttack');
+    const kinds = {};
+    const note = (k, n = 1) => { kinds[k] = (kinds[k] || 0) + n; };
+    const S = Math.max(1, cfg.expectStep || 2);
+    const jit = (amp) => (rnd() * 2 - 1) * amp;
+    const seq = async (startGrid, offsetsTicks, amp, tag) => {
+      const jitterMs = offsetsTicks.map(() => jit(amp));
+      const r = await withTimeout(page.evaluate(pressSequenceInPage, { startGrid, offsetsTicks, jitterMs }), 20000, tag);
+      pressCount += offsetsTicks.length; note(tag, offsetsTicks.length);
+      return r;
     };
     while (Date.now() < deadline) {
-      if (rnd() < 0.3) {
+      const r = rnd();
+      if (r < 0.28) { // 準拍單擊（後拍 / 十六分 / 正拍），含輕微抖動
+        const g = [4, 8, 2, 16][Math.floor(rnd() * 4)];
+        await seq(g, [0], 30, 'on-beat');
+      } else if (r < 0.45) { // 隨機離拍單擊
+        pressCount++; note('random');
+        if (rnd() < 0.5) await page.keyboard.press('j'); else await call('pressAttack');
+      } else if (r < 0.60) { // 連打
         const n = 3 + Math.floor(rnd() * 3);
-        for (let i = 0; i < n && Date.now() < deadline; i++) { await press(); await sleep(25 + rnd() * 65); }
-      } else {
-        await press();
-      }
-      await sleep(80 + rnd() * 520);
+        for (let i = 0; i < n && Date.now() < deadline; i++) {
+          pressCount++; note('burst');
+          if (rnd() < 0.5) await page.keyboard.press('j'); else await call('pressAttack');
+          await sleep(25 + rnd() * 65);
+        }
+      } else if (r < 0.75) { await seq(32, [0, 8, 16, 24], 12, 'bar-run'); }
+      else if (r < 0.88) { await seq(8, [0, 4, 8, 12], 12, 'eighth-run'); }
+      else { await seq(32, [-3 * S, -2 * S, -S, 0], 8, 'fill-mash'); }
+      await sleep(120 + rnd() * 500);
     }
     // 等最後的攻擊命中
     await sleep((2 * beatDur + 0.3) * 1000);
@@ -698,13 +841,13 @@ async function runConfig(browser, baseUrl, cfg, opts) {
     if (opts.shots) {
       try {
         fs.mkdirSync(opts.shots, { recursive: true });
-        await page.screenshot({ path: path.join(opts.shots, `rhythm-${cfg.bpm}-${cfg.quantizeMode}.png`) });
+        await page.screenshot({ path: path.join(opts.shots, `rhythm-${cfg.bpm}-${cfg.subdivision ?? 'auto'}${cfg.lateGraceMs === 0 ? '-strict' : ''}.png`) });
       } catch (e) { errors.push(`screenshot 失敗：${e.message}`); }
     }
     await call('stop').catch((e) => errors.push(`stop() 失敗：${e.message}`));
     result.data = { attacks, beats, world, metro, state, errors, pressCount };
     result.checks = analyzeRun({ ...result.data }, { ...cfg, bars: opts.bars });
-    result.checks.unshift({ id: 'B-info', name: '輸入統計', status: 'INFO', detail: `按鍵 ${pressCount} 次，記錄到攻擊 ${attacks.length}、beat ${beats.length}、world ${world.length}、metronome ${metro.length}` });
+    result.checks.unshift({ id: 'B-info', name: '輸入統計', status: 'INFO', detail: `按鍵 ${pressCount} 次（${Object.entries(kinds).map(([k, v]) => `${k}=${v}`).join(' ')}），記錄到攻擊 ${attacks.length}、beat ${beats.length}、world ${world.length}、metronome ${metro.length}` });
   } catch (e) {
     result.fatal = e.message;
     result.checks = [{ id: 'B-fatal', name: '執行稽核', status: 'FAIL', detail: e.message }];
@@ -716,24 +859,34 @@ async function runConfig(browser, baseUrl, cfg, opts) {
 }
 
 // ---------------------------------------------------------------------------
-// Part B 的離線渲染驗證（B9 / B9b）：用 OfflineAudioContext 渲染遊戲自己的音效，量測真實發聲 onset
+// Part B 的離線渲染驗證（B9 / B9b / B10）：用 OfflineAudioContext 渲染遊戲自己的音效，量測真實發聲 onset 與響度
 // ---------------------------------------------------------------------------
-/** 在頁面內執行：渲染各攻擊種類與 click，回傳原始樣本供 Node 端偵測 onset。 */
-async function renderSfxInPage({ baseUrl }) {
-  const { SfxVoices } = await import(new URL('js/audio/sfxVoices.js', baseUrl).href);
+/** 在頁面內執行：每個變體各用獨立的 OfflineAudioContext 渲染（避免殘響互相污染），回傳樣本。 */
+async function renderHitsInPage({ baseUrl }) {
+  const mod = await import(new URL('js/audio/sfxVoices.js', baseUrl).href);
+  const { SfxVoices } = mod;
+  const LEVELS = mod.HIT_LEVELS || ['bar', 'half', 'beat', 'eighth', 'sixteenth', 'thirtysecond'];
   const SR = 44100;
-  const kinds = ['front', 'down', 'back', 'combo8', 'finisher', 'click-accent', 'click-normal'];
-  const t0 = 0.5; const gap = 0.7;
-  const off = new OfflineAudioContext(1, Math.ceil(SR * (t0 + gap * kinds.length + 0.5)), SR);
-  const v = new SfxVoices(off, { sfx: off.destination, click: off.destination });
-  const events = kinds.map((k, i) => ({ kind: k, t: t0 + gap * i + 0.00037 * (i + 1) }));
-  for (const e of events) {
-    if (e.kind === 'click-accent') v.click(e.t, true);
-    else if (e.kind === 'click-normal') v.click(e.t, false);
-    else v.attack(e.kind, e.t);
+  const variants = [];
+  for (const level of LEVELS) for (const onBeat of [true, false]) variants.push({ name: `${level}/${onBeat ? 'on' : 'off'}`, desc: { level, onBeat, fever: false, combo: null, parry: false } });
+  variants.push({ name: 'combo-fill', desc: { level: 'bar', onBeat: true, fever: false, combo: 'fill', parry: false } });
+  variants.push({ name: 'combo-bar', desc: { level: 'beat', onBeat: true, fever: false, combo: 'bar', parry: false } });
+  variants.push({ name: 'combo-eighth', desc: { level: 'eighth', onBeat: true, fever: false, combo: 'eighth', parry: false } });
+  variants.push({ name: 'parry', desc: { level: 'beat', onBeat: true, fever: false, combo: null, parry: true } });
+  variants.push({ name: 'fever/beat', desc: { level: 'beat', onBeat: false, fever: true, combo: null, parry: false } });
+  variants.push({ name: 'click-accent', click: true, accent: true });
+  variants.push({ name: 'click-normal', click: true, accent: false });
+  const out = [];
+  for (let i = 0; i < variants.length; i++) {
+    const v = variants[i];
+    const t = 0.1 + 0.00037 * (i + 1);
+    const off = new OfflineAudioContext(1, Math.ceil(SR * (t + 1.0)), SR);
+    const voices = new SfxVoices(off, { sfx: off.destination, click: off.destination });
+    if (v.click) voices.click(t, v.accent); else voices.hit(v.desc, t);
+    const buf = await off.startRendering();
+    out.push({ name: v.name, t, samples: Array.from(buf.getChannelData(0)) });
   }
-  const buf = await off.startRendering();
-  return { sr: SR, events, samples: Array.from(buf.getChannelData(0)) };
+  return { sr: SR, levels: LEVELS, items: out };
 }
 
 /** B9b：預設曲 + 節拍器（beat0 = 0）。回傳 mix 與純音樂兩份渲染（click = mix − music）。 */
@@ -773,25 +926,62 @@ export function detectOnset(x, sr, t, frac = 0.1, pre = 0.003, post = 0.06) {
   return NaN;
 }
 
+/** 前 windowSec 秒（自排定時間起）的 RMS。 */
+function rmsFrom(x, sr, t, windowSec = 0.06) {
+  const i0 = Math.max(0, Math.floor(t * sr));
+  const i1 = Math.min(x.length, Math.floor((t + windowSec) * sr));
+  let s = 0;
+  for (let i = i0; i < i1; i++) s += x[i] * x[i];
+  return Math.sqrt(s / Math.max(1, i1 - i0));
+}
+
 async function runOfflineAudit(browser, baseUrl) {
   const checks = [];
   const context = await browser.newContext({ viewport: { width: 960, height: 540 } });
   const page = await context.newPage();
   try {
     await page.goto(baseUrl, { waitUntil: 'load', timeout: 20000 });
-    // B9
-    const r = await page.evaluate(renderSfxInPage, { baseUrl });
-    const rows = r.events.map((e) => {
-      const on = detectOnset(r.samples, r.sr, e.t);
-      return { kind: e.kind, errMs: (on - e.t) * 1000 };
-    });
-    const bad = rows.filter((x) => !(Math.abs(x.errMs) <= 2));
-    checks.push({
-      id: 'B9', name: 'OfflineAudioContext 渲染：各攻擊音效與節拍器 click 的真實 onset 與排定時間差 ≤ 2 ms（10% 峰值偵測）',
-      status: bad.length === 0 ? 'PASS' : 'FAIL',
-      detail: rows.map((x) => `${x.kind}=${f(x.errMs, 3)}ms`).join('  ') + (bad.length ? `；超標：${bad.map((x) => x.kind).join(',')}` : ''),
-      metrics: { onsetErrMs: Object.fromEntries(rows.map((x) => [x.kind, x.errMs])) },
-    });
+    // B9 + B10
+    let r = null;
+    try { r = await page.evaluate(renderHitsInPage, { baseUrl }); } catch (e) {
+      checks.push({ id: 'B9', name: 'SfxVoices#hit 離線渲染', status: 'FAIL', detail: `渲染失敗：${e.message}（sfxVoices.js 是否已提供 hit() 與 HIT_LEVELS？）` });
+    }
+    if (r) {
+      const rows = r.items.map((e) => {
+        const on = detectOnset(e.samples, r.sr, e.t);
+        return { name: e.name, errMs: (on - e.t) * 1000, rms: rmsFrom(e.samples, r.sr, e.t) };
+      });
+      const bad = rows.filter((x) => !(Math.abs(x.errMs) <= 2));
+      checks.push({
+        id: 'B9', name: 'OfflineAudioContext 渲染：SfxVoices#hit 每個 level×{onBeat,off}、連段 fill/bar/eighth、招架、狂熱與節拍器 click 的真實 onset 與排定時間差 ≤ 2 ms（10% 峰值偵測）',
+        status: bad.length === 0 ? 'PASS' : 'FAIL',
+        detail: rows.map((x) => `${x.name}=${f(x.errMs, 3)}ms`).join('  ') + (bad.length ? `；超標：${bad.map((x) => x.name).join(',')}` : ''),
+        metrics: { onsetErrMs: Object.fromEntries(rows.map((x) => [x.name, x.errMs])) },
+      });
+
+      // B10：響度順序（§4）
+      const rms = Object.fromEntries(rows.map((x) => [x.name, x.rms]));
+      const order = ['bar', 'half', 'beat', 'eighth', 'sixteenth', 'thirtysecond'];
+      const problems = [];
+      for (const side of ['on', 'off']) {
+        for (let i = 0; i + 1 < order.length; i++) {
+          const hi = rms[`${order[i]}/${side}`]; const lo = rms[`${order[i + 1]}/${side}`];
+          const halfBeat = order[i] === 'half' && order[i + 1] === 'beat';
+          const ok = halfBeat ? hi >= lo * 0.95 : hi > lo * 1.02;
+          if (!ok) problems.push(`${order[i]}/${side}(${f(hi, 4)}) ${halfBeat ? '≥' : '>'} ${order[i + 1]}/${side}(${f(lo, 4)}) 不成立`);
+        }
+      }
+      for (const lv of order) {
+        const on = rms[`${lv}/on`]; const off = rms[`${lv}/off`];
+        if (!(on > off)) problems.push(`${lv}: onBeat(${f(on, 4)}) 應大於 off(${f(off, 4)})`);
+      }
+      checks.push({
+        id: 'B10', name: '響度順序（前 60 ms RMS）：bar > half ≥ beat > eighth > sixteenth > thirtysecond（half≥beat 容許 5%），且每個 level onBeat > off',
+        status: problems.length === 0 ? 'PASS' : 'FAIL',
+        detail: `onBeat：${order.map((l) => `${l}=${f(rms[`${l}/on`], 4)}`).join(' ')}；off：${order.map((l) => `${l}=${f(rms[`${l}/off`], 4)}`).join(' ')}${problems.length ? '；' + firstN(problems, 5) : ''}`,
+        metrics: { rms },
+      });
+    }
     // B9b
     const bpm = 88;
     const m = await page.evaluate(renderMixInPage, { baseUrl, bpm, offsetMs: 0, seconds: 4.2 });
@@ -800,7 +990,6 @@ async function runOfflineAudit(browser, baseUrl) {
     const errs = [];
     for (let n = 0; n < m.nBeats; n++) errs.push((detectOnset(resid, m.sr, n * m.beatDur, 0.1, 0, 0.04) - n * m.beatDur) * 1000);
     const st = stats(errs.map((e) => Math.abs(e)));
-    // 音樂本身：鼓的 onset 與 beat 網格（混音內，beat0=0）— 取每一拍視窗內的第一個 10% 峰值樣本
     const mErrs = [];
     for (let n = 0; n < m.nBeats; n++) {
       const on = detectOnset(m.music, m.sr, n * m.beatDur, 0.1, 0, 0.03);
@@ -818,7 +1007,7 @@ async function runOfflineAudit(browser, baseUrl) {
   } finally {
     await context.close().catch(() => {});
   }
-  return { config: { bpm: 'n/a', quantizeMode: 'offline-render', lateGraceMs: '-' }, checks, data: null, fatal: null };
+  return { config: { bpm: 'n/a', subdivision: 'offline-render', lateGraceMs: '-' }, checks, data: null, fatal: null };
 }
 
 async function runBrowserPart(opts, baseUrl) {
@@ -833,17 +1022,18 @@ async function runBrowserPart(opts, baseUrl) {
     return { status: 'SKIPPED', reason: `無法啟動 Chromium：${e.message.split('\n')[0]}（可試 npx playwright install chromium）`, configs: [] };
   }
   const matrix = opts.quick
-    ? [{ bpm: 88, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half', lateGraceMs: 0 }]
-    : [{ bpm: 88, quantizeMode: 'half' }, { bpm: 88, quantizeMode: 'beat' }, { bpm: 72.5, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half' }, { bpm: 150, quantizeMode: 'half' },
-      { bpm: 40, quantizeMode: 'half' }, { bpm: 240, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half', lateGraceMs: 0 }];
+    ? [{ bpm: 88 }, { bpm: 150 }, { bpm: 120, lateGraceMs: 0 }]
+    : [{ bpm: 88 }, { bpm: 88, subdivision: 2 }, { bpm: 120 }, { bpm: 150 }, { bpm: 40 }, { bpm: 240 }, { bpm: 120, lateGraceMs: 0 }];
   const configs = [];
   try {
     for (const cfg of matrix.filter((c) => !opts.only || opts.only.includes(c.bpm))) {
       // 慢速曲（40 BPM）縮減小節數，但至少 2 小節；窗口上限約 24 秒
       const bars = Math.max(2, Math.min(opts.bars, Math.floor(24 / (4 * 60 / cfg.bpm))));
       const lg = cfg.lateGraceMs ?? 40;
-      console.error(`… 執行 bpm=${cfg.bpm} mode=${cfg.quantizeMode} lateGraceMs=${lg}（${bars} 小節，約 ${Math.round(bars * 4 * 60 / cfg.bpm + 4 * 60 / cfg.bpm + 4)} 秒）`);
-      configs.push(await runConfig(browser, baseUrl, { ...cfg, lateGraceMs: lg }, { ...opts, bars }));
+      const full = { subdivision: 'auto', ...cfg, lateGraceMs: lg };
+      full.expectStep = stepRef(full.subdivision, full.bpm);
+      console.error(`… 執行 bpm=${full.bpm} subdivision=${full.subdivision}（stepTicks ${full.expectStep}）lateGraceMs=${lg}（${bars} 小節，約 ${Math.round(bars * 4 * 60 / cfg.bpm + 4 * 60 / cfg.bpm + 4)} 秒）`);
+      configs.push(await runConfig(browser, baseUrl, full, { ...opts, bars }));
     }
     configs.push(await runOfflineAudit(browser, baseUrl));
   } finally {
@@ -920,7 +1110,7 @@ async function main() {
           for (const r of b.configs) {
             const cfgFail = r.checks.some((x) => x.status === 'FAIL');
             if (cfgFail) partFail = true;
-            console.log(`\n### bpm=${r.config.bpm}  mode=${r.config.quantizeMode}  grace=${r.config.lateGraceMs}ms  → ${cfgFail ? 'FAIL' : 'PASS'}`);
+            console.log(`\n### bpm=${r.config.bpm}  subdivision=${r.config.subdivision}  grace=${r.config.lateGraceMs}ms  → ${cfgFail ? 'FAIL' : 'PASS'}`);
             printChecks(r.checks);
           }
           full.parts.browser = {
@@ -939,7 +1129,7 @@ async function main() {
   console.log('\n==================== 總結 ====================');
   for (const [k, v] of Object.entries(full.parts)) {
     console.log(`  ${k === 'wav' ? 'Part A (WAV)' : 'Part B (browser)'}: ${v.status}${v.reason ? ` — ${v.reason}` : ''}`);
-    if (v.configs) for (const c of v.configs) console.log(`      bpm=${c.config.bpm} ${c.config.quantizeMode} grace=${c.config.lateGraceMs}: ${c.status}`);
+    if (v.configs) for (const c of v.configs) console.log(`      bpm=${c.config.bpm} 切分=${c.config.subdivision}${c.config.expectStep ? `(step ${c.config.expectStep})` : ''} grace=${c.config.lateGraceMs}: ${c.status}`);
   }
   full.summary = { result: anyFail ? 'FAIL' : 'PASS', exitCode: anyFail ? 1 : 0 };
   console.log(`  結果：${anyFail ? 'FAIL（有失敗項目）' : 'PASS（沒有 FAIL）'}`);

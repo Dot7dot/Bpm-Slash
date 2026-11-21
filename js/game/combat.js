@@ -1,6 +1,6 @@
 // Combat: BeatSnap attack queue, scheduled drum hits, impact frames, hit resolution, parry
 // (docs/DESIGN-BEATSNAP.md sections 3, 6, 7).
-import { beatSnap, JUDGE_MULTIPLIER, LEVEL_NAMES, tickSongTime } from '../core/beatSnap.js';
+import { beatSnap, JUDGE_MULTIPLIER, LEVEL_NAMES, stepTicksFor } from '../core/beatSnap.js';
 import { COLORS, JUDGE_COLORS } from './constants.js';
 import { pushLog } from '../debug/debugHook.js';
 
@@ -47,6 +47,9 @@ export class Combat {
     this._parryWatch = null;
   }
 
+  /** Current connect-grid step in ticks (for the HUD). */
+  get stepTicks() { return stepTicksFor(this.game.settings.subdivision, this.game.conductor.bpm); }
+
   get busy() { return this.queue.length > 0; }
   get pendingCount() { return this.queue.filter((a) => a.state === 'pending').length; }
 
@@ -73,6 +76,7 @@ export class Combat {
   markParried(attack) {
     if (!attack || attack.parried) return false;
     attack.parried = true;
+    attack.parry = true;
     attack.log.parry = true;
     return true;
   }
@@ -132,7 +136,8 @@ export class Combat {
       id: this.nextId++, kind, level: snap.level, tick: snap.tick, q: snap, combo: res.combo, comboRes: res,
       fever: feverActive,
       inputSongTime: input, connectSongTime: snap.connectSongTime, slotSongTime: snap.connectSongTime,
-      state: 'pending', impactSongTime: null, parried: false,
+      state: 'pending', impactSongTime: null, parried: false, parry: false,
+      judgment: snap.judgment, onBeat: snap.onBeat,
       swingSec: Math.min(0.07, snap.stepTicks * tickDur * 0.6),
       windupStart: Math.max(input, prev ? prev.connectSongTime : -Infinity),
       log: null,

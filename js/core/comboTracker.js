@@ -146,7 +146,7 @@ export class FeverMeter {
 
   /** Per-frame: decay by the song-time delta (never by frame count). */
   update(songTime, beatDur) {
-    const dt = this._lastT === null ? 0 : Math.min(0.25, Math.max(0, songTime - this._lastT));
+    const dt = this._lastT === null ? 0 : Math.max(0, songTime - this._lastT);
     this._lastT = songTime;
     if (this.active) {
       this.value = Math.max(0, 1 - (songTime - this.startSongTime) / (FEVER_BEATS * beatDur));
