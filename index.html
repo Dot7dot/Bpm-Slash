@@ -20,6 +20,12 @@
     <button id="t-attack" class="tbtn attack" type="button">斬</button>
   </div>
 
+  <!-- 直向提示（手機遊戲中）：不攔截觸控，僅 ✕ 可點 -->
+  <div id="rotate-tip" class="rotate-tip" role="status">
+    <span>請將手機轉為橫向，畫面會更大</span>
+    <button id="rotate-tip-close" class="rotate-tip-close" type="button" aria-label="關閉提示">✕</button>
+  </div>
+
   <!-- 主選單 -->
   <main id="menu" class="screen">
     <div class="panel">
@@ -67,11 +73,7 @@
             <button id="offset-plus" class="btn small" type="button">+10</button>
           </div>
         </div>
-        <div class="row">
-          <button id="btn-preview" class="btn accent" type="button">▶ 試聽對拍</button>
-          <span id="preview-dot" class="dot" aria-hidden="true"></span>
-          <span id="preview-state" class="hint">從頭播放歌曲並疊加節拍器；調整 BPM 或偏移會即時生效</span>
-        </div>
+        <p id="preview-state" class="hint">從頭播放歌曲並疊加節拍器；調整 BPM 或偏移會即時生效</p>
       </section>
 
       <section class="card">
@@ -105,8 +107,14 @@
         </div>
       </section>
 
-      <button id="btn-start" class="btn start" type="button">開始遊戲</button>
       <p class="hint center">← → / A D 移動　J / K / 空白鍵 攻擊　Esc / P 暫停</p>
+
+      <!-- 底部操作列：捲動時仍固定可見 -->
+      <footer class="action-bar">
+        <button id="btn-preview" class="btn accent" type="button">▶ 試聽對拍</button>
+        <span id="preview-dot" class="dot" aria-hidden="true"></span>
+        <button id="btn-start" class="btn start" type="button">開始遊戲</button>
+      </footer>
     </div>
   </main>
 

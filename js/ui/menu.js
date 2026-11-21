@@ -121,10 +121,12 @@ export class Menu {
       }
       const mod = await import('../core/bpmDetect.js');
       const r = mod.detectBpm(mono, sr);
-      if (!r || !Number.isFinite(r.bpm)) throw new Error('no result');
+      if (!r || !Number.isFinite(r.bpm) || r.bpm <= 0) throw new Error('no result');
       this.detected = r;
-      const conf = r.confidence <= 1 ? Math.round(r.confidence * 100) : Math.round(r.confidence);
-      out.textContent = `建議：${(Math.round(r.bpm * 10) / 10)} BPM，第一拍 ${Math.round((r.offsetSec || 0) * 1000)} ms（信心 ${conf}%）`;
+      // The confidence value is only a rough ranking signal, so show a qualitative label instead of a percentage.
+      const c = Number(r.confidence) || 0;
+      const level = c >= 0.25 ? '高' : c >= 0.12 ? '中' : '低';
+      out.textContent = `建議：${(Math.round(r.bpm * 10) / 10)} BPM，第一拍 ${Math.round((r.offsetSec || 0) * 1000)} ms（可信度：${level}）。建議按「試聽對拍」用耳朵確認後再套用`;
       $('btn-apply-detect').classList.remove('hidden');
     } catch (e) {
       out.textContent = '自動偵測失敗，請改用 Tap Tempo 或手動輸入';

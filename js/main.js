@@ -45,14 +45,22 @@ class App {
     this._bindUi();
     this.resize();
     window.addEventListener('resize', () => this.resize());
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', () => this.resize());
     document.body.classList.toggle('has-touch', 'ontouchstart' in window || navigator.maxTouchPoints > 0);
+    // Push saved settings into the conductor now (no AudioContext needed), so the
+    // debug state and the UI agree right after a reload.
+    this.applyParams();
     this.useDefaultSong(false);
     requestAnimationFrame((t) => this.frame(t));
   }
 
   // ---------- layout ----------
   resize() {
-    const vw = window.innerWidth, vh = window.innerHeight;
+    // Use the visual viewport when available so the canvas fills the full visible width
+    // (portrait phones: scale is width-limited, so this is the largest size possible).
+    const vv = window.visualViewport;
+    const vw = Math.floor((vv && vv.width) || window.innerWidth);
+    const vh = Math.floor((vv && vv.height) || window.innerHeight);
     const scale = Math.min(vw / W, vh / H);
     const cssW = Math.floor(W * scale), cssH = Math.floor(H * scale);
     const dpr = Math.min(3, window.devicePixelRatio || 1);
@@ -281,6 +289,7 @@ class App {
     const atkUp = () => atk.classList.remove('down');
     atk.addEventListener('pointerup', atkUp); atk.addEventListener('pointercancel', atkUp); atk.addEventListener('pointerleave', atkUp);
     $('t-pause').addEventListener('click', () => this.pause());
+    $('rotate-tip-close').addEventListener('click', () => document.body.classList.add('tip-dismissed'));
   }
 
   get moveDir() {
