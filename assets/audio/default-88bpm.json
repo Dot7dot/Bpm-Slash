@@ -1,11 +1,12 @@
 {
-  "title": "霓虹步伐 Neon Step",
+  "title": "霓虹步伐 Neon Step（去鼓伴奏版）",
   "bpm": 88,
   "offsetMs": 0,
   "beatsPerBar": 4,
   "bars": 32,
   "durationSec": 87.27272727272727,
   "sampleRate": 22050,
+  "drums": false,
   "sections": [
     {
       "startBar": 0,

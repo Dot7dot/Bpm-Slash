@@ -2,6 +2,17 @@
 import { mod } from '../core/beatMath.js';
 import { SfxVoices, makeNoiseBuffer, KIND_TO_DESC } from './sfxVoices.js';
 
+/** Zero-latency soft limiter curve: identity up to `knee`, tanh knee above, output never exceeds 1. */
+export function makeLimiterCurve(knee = 0.75, n = 4097) {
+  const curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1, a = Math.abs(x);
+    const y = a <= knee ? a : knee + (1 - knee) * Math.tanh((a - knee) / (1 - knee));
+    curve[i] = Math.sign(x) * y;
+  }
+  return curve;
+}
+
 const DEFAULT_JSON = { title: '預設曲 Neon Pulse', bpm: 88, offsetMs: 0, beatsPerBar: 4, bars: 32 };
 
 export class AudioEngine {
@@ -35,7 +46,11 @@ export class AudioEngine {
     const c = this.ctx;
     this.master = c.createGain();
     this.master.gain.value = 1;
-    this.master.connect(c.destination);
+    // Master soft limiter (linear below 0.75, smooth knee, hard ceiling at 0 dBFS; zero latency).
+    this.masterShaper = c.createWaveShaper();
+    this.masterShaper.curve = makeLimiterCurve();
+    this.master.connect(this.masterShaper);
+    this.masterShaper.connect(c.destination);
     this.musicGain = c.createGain();
     this.sfxGain = c.createGain();
     this.clickGain = c.createGain();
@@ -45,6 +60,7 @@ export class AudioEngine {
     for (let i = 0; i < curve.length; i++) { const x = (i / 512) - 1; curve[i] = Math.tanh(x * 1.2) / Math.tanh(1.2); }
     this.sfxShaper = c.createWaveShaper();
     this.sfxShaper.curve = curve;
+    this.sfxShaper.oversample = 'none';
     this.sfxGain.connect(this.sfxShaper);
     this.sfxShaper.connect(this.master);
     this.clickGain.connect(this.master);
@@ -209,7 +225,7 @@ export class AudioEngine {
   playClick(when, accent) { this.voices.click(when, accent); }
 
   /**
-   * v2 hit SFX (drum kit) scheduled on the audio clock.
+   * v3 hit SFX (drum kit; desc.instrument 'kick'|'snare') scheduled on the audio clock.
    * playHit(desc, expectedAudioTime) -> { scheduledAudioTime, ctxNowAtSchedule, clamped }.
    * Transitional: playHit(boolean) behaves like the old reactive hit (= playConfirmHit).
    */
@@ -234,11 +250,10 @@ export class AudioEngine {
   playConfirmBlock() { const c = this.ensure(); this.voices.confirmBlock(c.currentTime); }
   playConfirmKill() { const c = this.ensure(); this.voices.confirmKill(c.currentTime); }
   playBlock() { this.playConfirmBlock(); }
-  playHurt() {
-    const c = this.ensure(); const t = c.currentTime;
-    this._tone(t, { type: 'sawtooth', f0: 320, f1: 70, dur: 0.3, gain: 0.4 });
-    this._noise(t, { f0: 600, f1: 150, dur: 0.25, gain: 0.35, type: 'lowpass' });
-  }
+  /** Parry actually succeeded (Game.onParry): soft-attack tonal clang tail. */
+  playConfirmParry() { const c = this.ensure(); this.voices.confirmParry(c.currentTime); }
+  /** Player hurt: soft attack (>= 15 ms), tonal, no sharp off-grid transient. */
+  playHurt() { const c = this.ensure(); this.voices.hurt(c.currentTime); }
   playKill() { this.playConfirmKill(); }
   playGo() {
     const c = this.ensure(); const t = c.currentTime;

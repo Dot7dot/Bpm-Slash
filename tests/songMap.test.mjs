@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { analyzeSongMap } from '../js/core/songMap.js';
+import { renderSong } from '../tools/generate-default-song.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -213,17 +214,14 @@ test('a 5-minute 44.1 kHz song analyzes well under 200 ms', () => {
   assert.ok(ms < 200, `耗時 ${ms.toFixed(1)} ms`);
 });
 
-test('default song: analysis roughly matches the arrangement', () => {
-  const { sampleRate, samples } = parseWav16Mono(readFileSync(resolve(ROOT, 'assets/audio/default-88bpm.wav')));
-  const r = analyzeSongMap(samples, sampleRate, { bpm: 88, offsetSec: 0, beatsPerBar: 4 });
+// 預設曲的段落斷言：排序斷言（不要求精確標籤）。含鼓版與去鼓版都應成立。
+function assertDefaultArrangement(r) {
   assert.equal(r.bars, 32);
-
   const intro = regionMean(r, 0, 4);
   const verse = regionMean(r, 4, 12);
   const chorus = regionMean(r, 12, 20);
   const breakdown = regionMean(r, 20, 24);
   const final = regionMean(r, 24, 32);
-  // 排序斷言：不要求精確標籤
   assert.ok(intro < chorus, `intro ${intro} < chorus ${chorus}`);
   assert.ok(breakdown < chorus, `breakdown ${breakdown} < chorus ${chorus}`);
   assert.ok(intro < final, `intro ${intro} < final ${final}`);
@@ -235,6 +233,22 @@ test('default song: analysis roughly matches the arrangement', () => {
   assert.equal(r.barIntensity[22], 'low');
   assert.equal(r.barIntensity[14], 'high');
   assert.equal(r.barIntensity[28], 'high');
+}
+
+// 含鼓版：在記憶體中渲染（與舊 WAV 逐取樣相同），不依賴檔案
+test('default song with drums (rendered in memory): analysis roughly matches the arrangement', () => {
+  const samples = Float32Array.from(renderSong({ drums: true }));
+  const r = analyzeSongMap(samples, 22050, { bpm: 88, offsetSec: 0, beatsPerBar: 4 });
+  assertDefaultArrangement(r);
+});
+
+// 去鼓版（assets 內的 WAV）：段落與能量排序仍應成立，因為鼓被移除而旋律、鋪底與貝斯保留
+test('default song drumless WAV: analysis roughly matches the arrangement', () => {
+  const { sampleRate, samples } = parseWav16Mono(readFileSync(resolve(ROOT, 'assets/audio/default-88bpm.wav')));
+  const r = analyzeSongMap(samples, sampleRate, { bpm: 88, offsetSec: 0, beatsPerBar: 4 });
+  assertDefaultArrangement(r);
+  // 去鼓後 breakdown 仍應低於 chorus（上方排序斷言已涵蓋，此處明示）
+  assert.ok(regionMean(r, 20, 24) < regionMean(r, 12, 20));
 });
 
 test('default song JSON sections cover all 32 bars contiguously', () => {

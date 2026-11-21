@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { detectBpm } from '../js/core/bpmDetect.js';
+import { renderSong } from '../tools/generate-default-song.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -143,15 +144,34 @@ function parseWav16(buf) {
 
 const DEFAULT_WAV = join(here, '..', 'assets', 'audio', 'default-88bpm.wav');
 
-test('default 88 BPM song WAV (skipped if not generated yet)', (t) => {
+// 預設曲的兩種版本。含鼓版在記憶體中渲染（與舊 WAV 逐取樣相同），去鼓版讀取實際的 WAV 檔。
+// 渲染結果快取於本檔案內，避免重複合成。
+let drumsSamplesCache = null;
+function defaultDrumsSamples() {
+  if (!drumsSamplesCache) drumsSamplesCache = Float32Array.from(renderSong({ drums: true }));
+  return drumsSamplesCache;
+}
+
+test('default 88 BPM song with drums (rendered in memory): 88 BPM and grid offset 0', () => {
+  const samples = defaultDrumsSamples();
+  const r = detectBpm(samples, 22050);
+  assert.ok(Math.abs(r.bpm - 88) <= 0.5, `bpm ${r.bpm} vs 88`);
+  const beatDur = 60 / 88;
+  const od = circDiff(r.offsetSec, 0, beatDur);
+  assert.ok(od <= 0.015, `offset ${r.offsetSec} (diff ${od.toFixed(4)} s)`);
+});
+
+test('default 88 BPM drumless WAV (skipped if not generated yet)', (t) => {
   if (!existsSync(DEFAULT_WAV)) {
     t.skip('assets/audio/default-88bpm.wav 尚未產生');
     return;
   }
   const { samples, sampleRate } = parseWav16(readFileSync(DEFAULT_WAV));
   const r = detectBpm(samples, sampleRate);
-  assert.ok(Math.abs(r.bpm - 88) <= 0.5, `bpm ${r.bpm} vs 88`);
-  const beatDur = 60 / 88;
-  const od = circDiff(r.offsetSec, 0, beatDur);
-  assert.ok(od <= 0.015, `offset ${r.offsetSec} (diff ${od.toFixed(4)} s)`);
+  // 去鼓伴奏沒有明確的鼓點，節奏估計可能落在 88 的倍數或約數上（實測為 176，即 2 倍）。
+  // 因此只斷言 tempo 為 44、88、176 其一（容許 ±0.5），不要求 offset 與 88 格線對齊。
+  const candidates = [44, 88, 176];
+  const near = candidates.some((c) => Math.abs(r.bpm - c) <= 0.5);
+  assert.ok(near, `bpm ${r.bpm} should be 44, 88 or 176 (±0.5)`);
+  assert.ok(r.offsetSec >= 0 && r.offsetSec < 60 / r.bpm, `offset ${r.offsetSec} out of range`);
 });

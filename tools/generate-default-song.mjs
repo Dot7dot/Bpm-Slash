@@ -346,7 +346,7 @@ function peakOf(x) {
   return p;
 }
 
-// 渲染成品取樣（mono、22050 Hz）。
+// 渲染成品取樣（mono、22050 Hz，Float64Array，值域約 -1..1）。
 // 正規化到峰值 → tanh 軟削波 → 峰值 -1 dBFS。
 // drums:false 沿用含鼓版的增益（以含鼓版峰值為除數），讓兩版的響度關係一致。
 export function renderSong({ drums = true } = {}) {
@@ -354,7 +354,8 @@ export function renderSong({ drums = true } = {}) {
   const peak = peakOf(fullMix);
   const src = drums ? fullMix : renderMix(false);
   const norm = Math.tanh(DRIVE);
-  const out = new Float32Array(TOTAL_SAMPLES);
+  // 用 Float64Array 保留與原版完全相同的精度（Float32 會使 16-bit 量化差 1 LSB）
+  const out = new Float64Array(TOTAL_SAMPLES);
   for (let i = 0; i < TOTAL_SAMPLES; i++) {
     out[i] = (Math.tanh((DRIVE * src[i]) / peak) / norm) * PEAK;
   }
