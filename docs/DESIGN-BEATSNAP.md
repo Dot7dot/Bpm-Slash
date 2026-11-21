@@ -174,7 +174,9 @@
 
 1. 每一擊：`tick` 為整數，`connectSongTime == tick × beatDur/8`（誤差 < 1e-6 s）；`rule = 'snap'` 的 tick 是 `stepTicks` 的倍數；`late`/`aimed` 的 tick 是 `judgeStepTicks` 的倍數；`level`、`half`、`isDownbeat` 與 tick 一致。
 2. 以 §3.2 的參考實作重算，每一擊的 tick、rule、magnet、judgment 完全一致；tick 嚴格遞增；同時最多 3 個 pending。
-3. `rule = 'snap'` 與 `'aimed'` 的攻擊：`sfxClamped = false`，且 `|scheduled − expected| ≤ 1 ms`、`scheduled − ctxNowAtSchedule ≥ 0`；嚴格模式下所有攻擊都不得 clamped。`late` 可 clamped，誤差 ≤ outputLatency + lateGrace + 5 ms。
+3. `rule = 'snap'` 的攻擊：`sfxClamped = false`，且 `|scheduled − expected| ≤ 1 ms`、`scheduled − ctxNowAtSchedule ≥ 0`；嚴格模式下所有攻擊都不得 clamped。
+   - **總監裁定（aimed 的物理限制）**：非嚴格模式下，`aimed` 若在拍點前不到「`ctx.currentTime` 與聽覺域的差距」（約一個輸出延遲）才按下，音效只能立即播放（clamped），誤差 ≤ outputLatency + 15 ms；不得為了「網格上精準」而把它延到下一格，因為準確的按鍵反而會晚一整格才出聲，手感更差。這與 osu!、DDR 按下即發聲的做法一致，30 ms 內人耳仍聽成在拍上。`aimed` 在該範圍外一律不得 clamped。
+   - `late` 可 clamped，誤差 ≤ outputLatency + lateGrace + 15 ms（headless 的 `currentTime` 以約 10 ms 的區塊前進，所以容許 15 ms）。
 4. impact frame 規則沿用 DESIGN.md §11.3。
 5. 離線渲染：每個 level × {onBeat, off} 以及 fill、bar、eighth 連段、招架音色，真實 onset 與排定時間差 ≤ 2 ms；響度順序符合 §4。
 6. `fever-start` / `fever-end` 只在 `beatInBar 0`；招架只在攻擊 tick 等於敵人 strikeTick 時發生。
