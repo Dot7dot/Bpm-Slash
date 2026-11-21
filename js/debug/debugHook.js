@@ -64,7 +64,7 @@ export function installDebugHook(app) {
     },
     stop() { app.stopToMenu(); },
     /** Start / stop the 試聽對拍 preview (song + metronome clicks). Clicks are logged in getPreviewLog(). */
-    async startPreview() { if (!app.previewing) await app.togglePreview(); return app.previewing; },
+    async startPreview() { await app.songReady; if (app._songLoading) await app._songLoading; if (!app.previewing) await app.togglePreview(); return app.previewing; },
     stopPreview() { app.stopPreview(); },
     /** instrument: 'kick' (default) | 'snare'. Attack log entries carry `instrument` and `unison`. */
     pressAttack(instrument = 'kick') { return app.pressAttack(performance.now(), instrument === 'snare' ? 'snare' : 'kick'); },

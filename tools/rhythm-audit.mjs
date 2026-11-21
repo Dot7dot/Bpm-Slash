@@ -374,11 +374,11 @@ function analyzeWav(opts) {
   const direct = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - bpm) <= 0.5;
   const doubled = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - 2 * bpm) <= 1.0;
   const halved = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - bpm / 2) <= 0.5;
-  // 切分音（例：午夜放克的十六分貝斯）會讓自相關峰落在附點八分（×4/3，或折回的 ×3/4）：同樣視為同一 tempo 並記錄。
-  const dotted = Number.isFinite(tempo.bpm) && (Math.abs(tempo.bpm - bpm * 4 / 3) <= 0.01 * bpm * 4 / 3 + 0.5 || Math.abs(tempo.bpm - bpm * 3 / 4) <= 0.01 * bpm * 3 / 4 + 0.5);
-  c.check('A3', `獨立估計 tempo = ${bpm} BPM（或 ×2 = ${2 * bpm}、切分音的附點八分 ×4/3，視為同一 tempo）`,
+  // 切分音（例：午夜放克的十六分貝斯）或十六分琶音會讓自相關峰落在簡單比例（×4/3、×3/4、×2/3、×3/2）：同樣視為同一 tempo 並記錄。
+  const dotted = Number.isFinite(tempo.bpm) && [4 / 3, 3 / 4, 2 / 3, 3 / 2].some((r) => Math.abs(tempo.bpm - bpm * r) <= 0.01 * bpm * r + 0.5);
+  c.check('A3', `獨立估計 tempo = ${bpm} BPM（或 ×2 = ${2 * bpm}、切分音的 ×4/3、×2/3 等簡單比例，視為同一 tempo）`,
     direct || doubled || halved || dotted,
-    `估計 ${f(tempo.bpm, 3)} BPM（信心 ${f(tempo.confidence, 2)}）${direct ? '' : doubled ? `；為標稱的 ${f(ratio, 2)} 倍（去鼓伴奏的 onset 落在八分音符，倍速判定為 ${bpm}）` : halved ? '；為標稱的一半，視為同一 tempo' : dotted ? `；為標稱的 ${f(ratio, 3)} 倍（切分音的附點八分週期，視為同一 tempo）` : ''}`, tempo);
+    `估計 ${f(tempo.bpm, 3)} BPM（信心 ${f(tempo.confidence, 2)}）${direct ? '' : doubled ? `；為標稱的 ${f(ratio, 2)} 倍（去鼓伴奏的 onset 落在八分音符，倍速判定為 ${bpm}）` : halved ? '；為標稱的一半，視為同一 tempo' : dotted ? `；為標稱的 ${f(ratio, 3)} 倍（切分音／琶音的簡單比例週期，視為同一 tempo）` : ''}`, tempo);
   return { checks: c.items, report };
 }
 
