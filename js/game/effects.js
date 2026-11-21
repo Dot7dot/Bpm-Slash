@@ -83,6 +83,11 @@ export class Effects {
   judge(x, y, { judgment = 'good', onBeat = false, level = null, size = null, instrument = null, early = '' } = {}) {
     const col = { perfect: '#ffe45e', great: '#5cf2ff', good: '#7dff9a' }[judgment] || '#e0dcff';
     const word = { perfect: 'PERFECT', great: 'GREAT', good: 'GOOD', off: 'OFF' }[judgment] || String(judgment).toUpperCase();
+    if (!instrument) { // judge() is called right after the attack is queued: the newest queue entry is this hit
+      const q = stage.game && stage.game.combat && stage.game.combat.queue;
+      const last = q && q.length ? q[q.length - 1] : null;
+      if (last && last.instrument) instrument = last.instrument;
+    }
     const parts = [onBeat ? '準拍' : '離拍'];
     if (instrument) parts.push(INSTR_NAME[instrument] || instrument);
     if (level) parts.push(LEVEL_NAMES[level] || level);
@@ -146,8 +151,9 @@ export class Effects {
       });
     }
     if (this._seen.size > 200) { const keep = new Set(q.map((a) => a.id)); this._seen = keep; }
-    const lg = g.lastGroove;
-    if (lg && lg !== this._groove) { this._groove = lg; this.cheerVst = vst; }
+    const lg = (g.combat && g.combat.lastGroove) || g.lastGroove;
+    const gk = lg ? `${lg.id}:${lg.barIndex}:${lg.songTime}` : null;
+    if (gk && gk !== this._groove) { this._groove = gk; this.cheerVst = vst; }
   }
 
   comboText(x, y, combo) {

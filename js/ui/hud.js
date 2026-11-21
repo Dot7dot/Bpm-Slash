@@ -16,43 +16,34 @@ const GHOSTS = {
   rock: { name: '搖滾節奏', kick: [0, 16], snare: [8, 24] },
   four: { name: '四拍大鼓', kick: [0, 8, 16, 24], snare: [] },
 };
-let hist = []; // drum-score history: { id, key, tick, instr, level, judgment, state, impactVst }
+let hist = []; // this frame's drum-score items: { id, tick, instr, level, judgment, state, impactVst }
+const seenAt = new Map(); // hit id -> visual song time it was first seen connected (for the pop animation)
 let histLast = -1e9;
 
 const instrOf = (a) => (a && (a.instrument || (a.q && a.q.instrument))) === 'snare' ? 'snare' : 'kick';
 const levelOfTick = (m) => (m === 0 ? 'bar' : m % 16 === 0 ? 'half' : m % 8 === 0 ? 'beat' : m % 4 === 0 ? 'eighth' : m % 2 === 0 ? 'sixteenth' : 'thirtysecond');
 
-/** Merge the live queue (and combat.hits when Drummer exposes it) into a short history of drum hits. */
+/** Build this frame's drum hits: connected hits (combat.barHits) + queued attacks (combat.queued). */
 function collectHits(game, vst, tickDur) {
-  if (vst < histLast - 1) hist = [];
+  if (vst < histLast - 1) seenAt.clear();
   histLast = vst;
-  const upsert = (rec) => {
-    let h = hist.find((x) => x.key === rec.key);
-    if (!h && rec.tick !== undefined) h = hist.find((x) => x.tick === rec.tick && x.instr === rec.instr);
-    if (!h) { hist.push(rec); return; }
-    if (rec.state === 'impact' && h.state !== 'impact') { h.state = 'impact'; h.impactVst = rec.impactVst ?? vst; }
-    h.level = rec.level || h.level; h.judgment = rec.judgment || h.judgment;
-  };
   const c = game.combat;
-  const queue = (c && c.queue) || [];
-  for (const a of queue) {
-    if (a.state === 'cancelled') continue;
+  const out = [];
+  if (!c) { hist = out; return; }
+  const connected = Array.isArray(c.barHits) ? c.barHits : [];
+  const queued = Array.isArray(c.queued) ? c.queued : (c.queue || []).filter((a) => a.state === 'pending');
+  for (const h of connected) {
+    if (!Number.isFinite(h.tick)) continue;
+    if (!seenAt.has(h.id)) seenAt.set(h.id, vst);
+    out.push({ id: h.id, tick: h.tick, instr: instrOf(h), level: h.level || levelOfTick(((h.tick % 32) + 32) % 32), judgment: h.judgment || 'good', state: 'impact', impactVst: seenAt.get(h.id) });
+  }
+  for (const a of queued) {
     const tick = Number.isFinite(a.tick) ? a.tick : Math.round((a.connectSongTime ?? 0) / tickDur);
-    const ai = attackInfo(a);
-    upsert({
-      key: `q${a.id}`, tick, instr: instrOf(a), level: a.level || levelOfTick(((tick % 32) + 32) % 32), judgment: ai.judgment,
-      state: a.state === 'pending' ? 'pending' : 'impact', impactVst: a.impactSongTime ?? undefined,
-    });
+    if (out.some((o) => o.id === a.id)) continue;
+    out.push({ id: a.id, tick, instr: instrOf(a), level: a.level || levelOfTick(((tick % 32) + 32) % 32), judgment: a.judgment || (a.q && a.q.judgment) || 'good', state: 'pending', unison: !!a.unison });
   }
-  if (c && Array.isArray(c.hits)) {
-    for (const h of c.hits) {
-      if (!Number.isFinite(h.tick)) continue;
-      upsert({ key: `h${h.tick}${instrOf(h)}`, tick: h.tick, instr: instrOf(h), level: h.level || levelOfTick(((h.tick % 32) + 32) % 32), judgment: h.judgment || 'good', state: 'impact', impactVst: undefined });
-    }
-  }
-  // a pending entry whose queue record vanished (cancelled) is dropped; old bars pruned
-  const curBar = Math.floor(vst / tickDur / 32);
-  hist = hist.filter((h) => h.tick >= (curBar - 1) * 32 && (h.state === 'impact' || queue.some((a) => `q${a.id}` === h.key)));
+  if (seenAt.size > 300) { const ids = new Set(out.map((o) => o.id)); for (const k of seenAt.keys()) if (!ids.has(k)) seenAt.delete(k); }
+  hist = out;
 }
 
 /** Normalise an attack queue entry (v2 fields, with v1 fallbacks). */
