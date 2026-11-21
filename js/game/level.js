@@ -97,7 +97,7 @@ export class Level {
     const bi = b.beatIndex;
     const L = info.light;
     const flash = b.beatInBar === 0 && bi >= 0 ? Math.exp(-b.beatPhase * 6) * (info.reduce ? 0.25 : 1) : 0;
-    const decay = 0.28 + 0.72 * Math.exp(-b.beatPhase * 3.2);
+    const decay = 0.55 + 0.45 * Math.exp(-b.beatPhase * 3.2);
     const ROWS = [0, 16, 34, 56, 84, 120];
     const grad = ctx.createLinearGradient(0, 380, 0, H);
     grad.addColorStop(0, '#1d0a42');
@@ -128,9 +128,9 @@ export class Level {
         ctx.moveTo(xa + 1, ya + o0 + (yb - ya) / TILE); ctx.lineTo(xa + TILE - 1, yb + o0);
         ctx.lineTo(xa + TILE - 1, yb + o1); ctx.lineTo(xa + 1, ya + o1);
         ctx.closePath();
-        ctx.fillStyle = dark ? 'rgba(52,22,110,0.85)' : 'rgba(34,14,80,0.85)';
+        ctx.fillStyle = dark ? 'rgba(40,16,92,0.9)' : 'rgba(24,9,60,0.9)';
         ctx.fill();
-        const a = Math.min(0.95, (lit * decay * 0.85 + flash * 0.55) * L * (1 - j * 0.1));
+        const a = Math.min(0.95, (lit * decay * 0.92 + flash * 0.5) * L * (1 - j * 0.1));
         if (a > 0.02) {
           const c = tileColor(i, j, info, lit);
           ctx.fillStyle = `hsla(${c.h % 360},${c.s}%,${c.l}%,${a})`;

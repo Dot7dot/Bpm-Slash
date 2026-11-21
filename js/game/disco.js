@@ -14,7 +14,7 @@ export const LEVEL_COLORS = {
 };
 
 export const PALETTE = ['#4df3ff', '#ff4fd8', '#ffd24d', '#7dff9a', '#a66bff'];
-export const PALETTE_HUE = [186, 316, 46, 135, 265];
+export const PALETTE_HUE = [186, 316, 275, 150, 215];
 
 /** The game instance the stage reads from (set from Level.onBeat; ignored when stale, e.g. menu idle). */
 export const stage = { game: null, light: 1, lightT: 0, intCache: { bar: NaN, v: 'mid' } };
@@ -85,7 +85,7 @@ export function tileColor(i, j, info, lit) {
   }
   const hi = PALETTE_HUE[(((i >> 1) + j + b.beatIndex) % 5 + 5) % 5];
   void lit;
-  return { h: hi, s: 100, l: 60 };
+  return { h: hi, s: 100, l: 54 };
 }
 
 // ---------------------------------------------------------------- backdrop pieces
@@ -220,7 +220,7 @@ export function drawCrowd(ctx, camX, vst, bpm, info) {
 /** Mirror ball plus the light specks it throws on the walls (positions follow beatFloat). */
 export function drawMirrorBall(ctx, info) {
   const b = info.b;
-  const cx = W / 2; const cy = 68; const R = 32;
+  const cx = W / 2; const cy = 68; const R = 38;
   const rot = b.beatFloat * 0.42;
   const p = pulseAt(b.beatPhase, b.beatInBar);
   ctx.save();

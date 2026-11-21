@@ -18,6 +18,7 @@ class Enemy {
     this.id = id; this.type = type; this.x = x; this.y = 400;
     this.hp = hp; this.maxHp = hp; this.r = r;
     this.facing = -1; this.flash = 0; this.dead = false; this.shake = 0;
+    this.strikeRange = type === 'bat' ? 110 : 70; // parry reach used by Combat.findParry
     this.strikeTick = null; // tick (32nd note) of the strike beat while telegraphing; null otherwise
     this.stunned = false; this.stunSince = 0; this.curEv = null; this.showHint = false; this.bd = 0.68;
   }
@@ -40,11 +41,11 @@ class Enemy {
     if (this.state === 'strike' || this.state === 'tele' || this.state === 'swoop') this.state = this.type === 'bat' ? 'hover' : 'idle';
     this.tele = false;
     const fx = g.effects;
-    const top = this.y - this.r * 2 - 30;
-    fx.text(this.x, top, 'PARRY!', { color: '#ffe45e', size: 30, life: 0.9, rise: 34, channel: 'parry' });
+    const top = this.y - this.r * 2 - 96;
+    fx.text(this.x, top, 'PARRY!', { color: '#ffe45e', size: 34, life: 1.0, rise: 30, channel: 'parry' });
     fx.parryBurst(this.x, this.cy);
     if (ev) { g.logWorld('parry', this.id, ev); g.logWorld('enemy-stun', this.id, ev); }
-    void attack;
+    if (typeof g.onParry === 'function') g.onParry(this, attack);
   }
   /** Stunned enemies skip the beat; they wake on the next bar downbeat (and still act on that beat). */
   skipStunned(ev) {
@@ -288,7 +289,7 @@ export class Guard extends Enemy {
   }
   shove(dx) { super.shove(dx); this.step.from += dx; this.step.to += dx; }
   /** Is a hit coming from playerX blocked by the shield? (front-beat only; caller checks the move) */
-  blocks(playerX) { return Math.sign(playerX - this.x) === this.facing; }
+  blocks(playerX) { if (this.stunned) return false; return Math.sign(playerX - this.x) === this.facing; }
   update(vst, dt, g) {
     this.bd = g.conductor.beatDur;
     const u = clamp01((vst - this.step.t0) / (this.bd * 0.4));
