@@ -7,14 +7,14 @@ import { Effects } from './effects.js';
 import { Slime, Bat, Guard, waveFor } from './enemies.js';
 import { drawBackground } from './background.js';
 import { W } from './constants.js';
-import { ComboTracker } from '../core/comboTracker.js';
+import { ComboTracker, FeverMeter } from '../core/comboTracker.js';
 import { pushLog } from '../debug/debugHook.js';
 import { COLORS } from './constants.js';
 
 const MAX_ENEMIES = 6;
 
 export class Game {
-  constructor({ settings, conductor, engine, songName, songDurationSec }) {
+  constructor({ settings, conductor, engine, songName, songDurationSec, songMap = null }) {
     this.settings = settings;
     this.conductor = conductor;
     this.engine = engine;
@@ -25,6 +25,8 @@ export class Game {
     this.camera = new Camera();
     this.effects = new Effects();
     this.combo = new ComboTracker();
+    this.fever = new FeverMeter();
+    this.songMap = songMap; // { sections: [{startBar, endBar(excl), intensity}] } and/or { barIntensity: [] }
     this.combat = new Combat(this);
     this.enemies = [];
     this.nextEnemyId = 1;
@@ -39,11 +41,25 @@ export class Game {
   /** End-of-song time in song-time domain (file end). */
   get endSongTime() { return this.songDurationSec - this.conductor.offsetSec; }
 
-  logWorld(kind, entityId, ev) {
+  logWorld(kind, entityId, ev, extra = null) {
     pushLog('world', {
       kind, entityId, beatIndex: ev.beatIndex, beatInBar: ev.beatInBar,
       beatSongTime: ev.beatSongTime, firedSongTime: this.conductor.lastVisualSongTime,
+      ...(extra || {}),
     });
+  }
+
+  /** Drummer groove (docs/DESIGN-DRUMMER.md section 4): judge the bar that just ended, on the downbeat event. */
+  _checkGroove(ev) {
+    const bar = ev.barIndex - 1;
+    const gr = this.combat.evaluateBar(bar);
+    if (!gr) return;
+    this.combo.onGroove(gr);
+    this.fever.addBonus(gr.fever);
+    this.combat.lastGroove = { ...gr, barIndex: bar, songTime: ev.beatSongTime };
+    this.logWorld('groove', gr.id, ev, { pattern: gr.id, name: gr.name, nameEn: gr.nameEn, grooveBar: bar, score: gr.score, fever: gr.fever });
+    this.effects.text(this.player.x, this.player.y - 190, `GROOVE! ${gr.name}`, { color: COLORS.back, size: 34, life: 1.3, rise: 36, channel: 'groove' });
+    if (!this.settings.reduceFlashing) this.effects.flashScreen(0.25, '#ff4fd8', false);
   }
 
   onBeat(ev) {
@@ -51,14 +67,21 @@ export class Game {
       beatIndex: ev.beatIndex, beatInBar: ev.beatInBar, barIndex: ev.barIndex,
       beatSongTime: ev.beatSongTime, firedSongTime: this.conductor.lastVisualSongTime,
     });
+    const fv = this.fever.onBeat(ev);
+    if (fv === 'start') {
+      this.logWorld('fever-start', null, ev); // the HUD shows the FEVER banner
+    } else if (fv === 'end') {
+      this.logWorld('fever-end', null, ev);
+    }
     if (this.over) return;
+    if (ev.beatInBar === 0) this._checkGroove(ev);
     this.level.onBeat(ev, this, this.camera.x, this.camera.x + W);
     for (const e of this.enemies) e.onBeat(ev, this);
     if (ev.beatInBar === 0 && ev.barIndex >= 2) this._spawnWave(ev);
   }
 
   _spawnWave(ev) {
-    const types = waveFor(ev.barIndex);
+    const types = waveFor(ev.barIndex, this.intensityAtBar(ev.barIndex));
     let n = 0;
     for (const t of types) {
       if (this.enemies.length >= MAX_ENEMIES) break;
@@ -76,8 +99,35 @@ export class Game {
     }
   }
 
-  damageEnemy(e, dmg, kbSigned, kind) {
+  /** 'low' | 'mid' | 'high' for a bar index (out of range or no map: 'mid'). */
+  intensityAtBar(barIndex) {
+    const m = this.songMap;
+    if (!m || !Number.isFinite(barIndex) || barIndex < 0) return 'mid';
+    if (Array.isArray(m.sections) && m.sections.length) {
+      for (const s of m.sections) if (barIndex >= s.startBar && barIndex < s.endBar) return s.intensity;
+      return 'mid';
+    }
+    if (Array.isArray(m.barIntensity)) return m.barIntensity[barIndex] || 'mid';
+    return 'mid';
+  }
+
+  /** Reactive confirm sounds (feature-detected so older engines keep working). */
+  confirmHit(big) { const e = this.engine; if (e.playConfirmHit) e.playConfirmHit(big); else e.playHit(big); }
+  confirmBlock() { const e = this.engine; (e.playConfirmBlock || e.playBlock).call(e); }
+  confirmKill() { const e = this.engine; (e.playConfirmKill || e.playKill).call(e); }
+
+  /** A parry happened (called by an enemy's parry() or detected by Combat). Idempotent per attack. */
+  onParry(e, attack) {
+    if (!this.combat.markParried(attack)) return;
+    this.combo.onParry();
+    this.fever.onParry();
+    this.effects.text(this.player.x, this.player.y - 130, '+300', { color: '#ffe45e', size: 26, life: 0.9, rise: 20, channel: 'bonus' });
+    if (typeof this.engine.playConfirmParry === 'function') this.engine.playConfirmParry();
+  }
+
+  damageEnemy(e, dmgIn, kbSigned, kind) {
     const fx = this.effects;
+    const dmg = e.stunned ? dmgIn * 2 : dmgIn;
     const dead = e.takeHit(dmg);
     const shown = Math.round(dmg * 10) / 10;
     fx.text(e.x, e.y - e.r * 2 - 24, String(shown), { color: kind === 'back' ? COLORS.back : '#fff', size: 18, life: 0.55, rise: 28 });
@@ -87,7 +137,7 @@ export class Game {
       e.dead = true;
       fx.burst(e.x, e.cy, 24, { color: '#ffffff', speed: 300, life: 0.6, size: 4 });
       fx.ring(e.x, e.cy, 36, '#ffffff', 0.3);
-      this.engine.playKill();
+      this.confirmKill();
       this.kills++;
       this.combo.addScore(50);
       this.enemies = this.enemies.filter((x) => x !== e);
@@ -102,6 +152,7 @@ export class Game {
     p.kb = (p.x >= fromX ? 1 : -1) * 280;
     p.hurtT = 0.3;
     this.combo.onHurt();
+    this.fever.onHurt(this.vst);
     this.effects.burst(p.x, p.bodyY, 14, { color: COLORS.danger, speed: 260 });
     this.effects.flashScreen(0.5, '#ff4d6d', this.settings.reduceFlashing);
     this.camera.addShake(6, this.settings.reduceFlashing);
@@ -117,6 +168,7 @@ export class Game {
     if (!this.over) {
       this.player.update(dt, dir, this.level, this.combat.busy);
       this.combat.update(vst);
+      this.fever.update(vst, this.conductor.beatDur);
       for (const e of this.enemies.slice()) e.update(vst, dt, this);
       this.enemies = this.enemies.filter((e) => e.x > this.camera.x - 600 && e.x < this.camera.x + W + 900);
       if (this.level.spikeHits(this.player.x, 8) && this.level.spikeState === 'up') this.hurtPlayer(1, this.player.x - 1);

@@ -7,8 +7,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   bpm: 88,
   offsetMs: 0,
   inputCalibrationMs: 0,
-  lateGraceMs: 40,
-  quantizeMode: 'half',
+  lateGraceMs: 45, // v3 F4 final (was 40, briefly 25); a stored user value is kept
+  subdivision: 'auto', // 'auto' | 1 | 2 | 4 | 8 (beat divisions: quarter / eighth / sixteenth / thirty-second)
   metronome: true,
   musicVol: 0.8,
   sfxVol: 0.9,
@@ -17,6 +17,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
 const num = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
 
+export function sanitizeSubdivision(v) {
+  if (v === 'auto' || v === undefined || v === null) return 'auto';
+  const n = Number(v);
+  return n === 1 || n === 2 || n === 4 || n === 8 ? n : 'auto';
+}
+
 export function sanitizeSettings(s = {}) {
   const d = DEFAULT_SETTINGS;
   return {
@@ -24,7 +30,7 @@ export function sanitizeSettings(s = {}) {
     offsetMs: num(s.offsetMs, 0, 10000, d.offsetMs),
     inputCalibrationMs: num(s.inputCalibrationMs, -150, 150, d.inputCalibrationMs),
     lateGraceMs: num(s.lateGraceMs, 0, 100, d.lateGraceMs),
-    quantizeMode: s.quantizeMode === 'beat' ? 'beat' : 'half',
+    subdivision: sanitizeSubdivision(s.subdivision),
     metronome: s.metronome === undefined ? d.metronome : !!s.metronome,
     musicVol: num(s.musicVol, 0, 1, d.musicVol),
     sfxVol: num(s.sfxVol, 0, 1, d.sfxVol),

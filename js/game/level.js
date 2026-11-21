@@ -2,6 +2,7 @@
 import { mulberry32 } from '../core/rng.js';
 import { pulseAt, beatInfoAt } from '../core/beatMath.js';
 import { TILE, H, W } from './constants.js';
+import { stage, bindStage, stageInfo, patternFor, tileLit, tileColor } from './disco.js';
 
 const CHUNK_W = TILE * 16;
 
@@ -56,6 +57,7 @@ export class Level {
 
   /** Beat event: advance spike state (telegraph on 3rd beat, up on 4th, down on 1st). */
   onBeat(ev, game, viewX0, viewX1) {
+    bindStage(game);
     let kind = null;
     if (ev.beatInBar === 2) { this.spikeState = 'tele'; kind = 'spike-telegraph'; }
     else if (ev.beatInBar === 3) { this.spikeState = 'up'; kind = 'spike-up'; }
@@ -81,54 +83,83 @@ export class Level {
     const delay = Math.abs(i - centerTile) * 0.012;
     const b = beatInfoAt(vst - delay, bpm);
     const edge = pulseAt(b.beatPhase, b.beatInBar);
-    return { lift: edge * 9, glow: edge, down: b.beatInBar === 0 };
+    // kick drum thump: a ripple of extra lift travelling outward from the player's feet (animated from song time)
+    let thump = 0;
+    const g = stage.game;
+    const k = g && g.effects && g.effects.lastKick;
+    if (k && g.player) {
+      const age = vst - k.vst - Math.abs(i - Math.floor(g.player.x / TILE)) * 0.018;
+      if (age >= 0 && age < 0.5) thump = Math.exp(-age * 9) * 8 * (k.weight || 1) * (g.settings && g.settings.reduceFlashing ? 0.5 : 1);
+    }
+    return { lift: edge * 9 + thump, glow: Math.min(1, edge + thump / 8), down: b.beatInBar === 0 };
   }
 
   draw(ctx, cam, vst, bpm) {
+    const info = stageInfo(vst, bpm);
+    const b = info.b;
     const x0 = cam.x - 10;
     const first = Math.floor(x0 / TILE);
     const last = Math.floor((cam.x + W + 10) / TILE);
     const center = Math.floor((cam.x + W * 0.4) / TILE);
+    const pattern = patternFor(info);
+    const bi = b.beatIndex;
+    const L = info.light;
+    const flash = b.beatInBar === 0 && bi >= 0 ? Math.exp(-b.beatPhase * 6) * (info.reduce ? 0.25 : 1) : 0;
+    const decay = 0.55 + 0.45 * Math.exp(-b.beatPhase * 3.2);
+    const ROWS = [0, 16, 34, 56, 84, 120];
     const grad = ctx.createLinearGradient(0, 380, 0, H);
-    grad.addColorStop(0, '#2a0f55');
-    grad.addColorStop(1, '#0c0524');
+    grad.addColorStop(0, '#1d0a42');
+    grad.addColorStop(1, '#07031a');
     ctx.fillStyle = grad;
+    const tops = [];
     for (let i = first; i <= last; i++) {
       const xa = i * TILE;
       const tb = this.tileBounce(i, center, vst, bpm);
       const ya = this.groundY(xa) - tb.lift;
       const yb = this.groundY(xa + TILE) - tb.lift;
+      tops.push([ya, yb, tb]);
       ctx.beginPath();
       ctx.moveTo(xa, ya); ctx.lineTo(xa + TILE, yb);
       ctx.lineTo(xa + TILE, H + 20); ctx.lineTo(xa, H + 20);
       ctx.closePath();
       ctx.fill();
     }
+    // lit dance-floor tiles
+    for (let i = first; i <= last; i++) {
+      const xa = i * TILE;
+      const [ya, yb] = tops[i - first];
+      for (let j = 0; j < ROWS.length - 1; j++) {
+        const lit = tileLit(i, j, center, pattern, bi);
+        const dark = ((i + j) & 1) === 0;
+        const o0 = ROWS[j] + 1.5; const o1 = ROWS[j + 1] - 0.5;
+        ctx.beginPath();
+        ctx.moveTo(xa + 1, ya + o0 + (yb - ya) / TILE); ctx.lineTo(xa + TILE - 1, yb + o0);
+        ctx.lineTo(xa + TILE - 1, yb + o1); ctx.lineTo(xa + 1, ya + o1);
+        ctx.closePath();
+        ctx.fillStyle = dark ? 'rgba(40,16,92,0.9)' : 'rgba(24,9,60,0.9)';
+        ctx.fill();
+        const a = Math.min(0.95, (lit * decay * 0.92 + flash * 0.5) * L * (1 - j * 0.1));
+        if (a > 0.02) {
+          const c = tileColor(i, j, info, lit);
+          ctx.fillStyle = `hsla(${c.h % 360},${c.s}%,${c.l}%,${a})`;
+          ctx.fill();
+        }
+      }
+    }
     // neon top edge
     ctx.save();
     ctx.lineWidth = 2.5;
     for (let i = first; i <= last; i++) {
       const xa = i * TILE;
-      const tb = this.tileBounce(i, center, vst, bpm);
-      const ya = this.groundY(xa) - tb.lift;
-      const yb = this.groundY(xa + TILE) - tb.lift;
+      const [ya, yb, tb] = tops[i - first];
       const g = tb.glow;
-      ctx.strokeStyle = tb.down ? `rgba(255,210,77,${0.45 + 0.55 * g})` : `rgba(77,243,255,${0.45 + 0.55 * g})`;
-      ctx.shadowColor = tb.down ? '#ffd24d' : '#4df3ff';
-      ctx.shadowBlur = 4 + 14 * g;
+      const rainbow = info.fever ? `hsla(${(b.beatFloat * 70 + i * 24) % 360},100%,62%,` : null;
+      ctx.strokeStyle = rainbow ? `${rainbow}${0.6 + 0.4 * g})` : tb.down ? `rgba(255,210,77,${0.45 + 0.55 * g})` : `rgba(77,243,255,${0.45 + 0.55 * g})`;
+      ctx.shadowColor = rainbow ? `hsl(${(b.beatFloat * 70 + i * 24) % 360},100%,62%)` : tb.down ? '#ffd24d' : '#4df3ff';
+      ctx.shadowBlur = 4 + 12 * g;
       ctx.beginPath(); ctx.moveTo(xa, ya); ctx.lineTo(xa + TILE, yb); ctx.stroke();
-      // tile seam
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = 'rgba(180,120,255,0.18)';
-      ctx.beginPath(); ctx.moveTo(xa, ya + 2); ctx.lineTo(xa, H); ctx.stroke();
     }
     ctx.restore();
-    // grid lines under the ground
-    ctx.strokeStyle = 'rgba(255,79,216,0.10)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let y = 470; y < H; y += 24) { ctx.moveTo(cam.x - 10, y); ctx.lineTo(cam.x + W + 10, y); }
-    ctx.stroke();
   }
 
   drawSpikes(ctx, cam, vst, bpm) {

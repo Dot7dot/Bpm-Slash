@@ -10,14 +10,18 @@ export function showResults(game, died) {
   g.className = 'grade g-' + grade;
   $('res-score').textContent = String(Math.floor(c.score));
   $('res-chain').textContent = c.maxChain;
-  $('res-combos').textContent = c.eighthCombos + c.finishers;
+  $('res-combos').textContent = c.eighthCombos + c.finishers + c.fills;
   $('res-perfect').textContent = c.judgments.perfect;
   $('res-great').textContent = c.judgments.great;
   $('res-good').textContent = c.judgments.good;
-  $('res-auto').textContent = c.judgments.auto;
+  $('res-auto').textContent = c.judgments.off;
   $('res-front').textContent = c.halves.front;
-  $('res-back').textContent = c.halves.back;
+  $('res-back').textContent = c.halves.back + c.halves.sub;
   $('res-down').textContent = c.halves.downbeat;
+  $('res-kick').textContent = c.kicks;
+  $('res-snare').textContent = c.snares;
+  $('res-unison').textContent = c.unisons;
+  $('res-groove').textContent = c.grooves;
   $('res-kills').textContent = game.kills;
   $('results').classList.remove('hidden');
 }

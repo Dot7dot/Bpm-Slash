@@ -45,7 +45,8 @@ function mulberry32(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const rand = mulberry32(SEED);
+// PRNG 狀態於 renderMix() 內重設（見下方）
+let rand = null;
 const noise = () => rand() * 2 - 1;
 
 // ---------- 濾波器（單極點）----------
@@ -68,7 +69,9 @@ function makeLP(fc) {
 }
 
 // ---------- 混音緩衝與音符工具 ----------
-const mix = new Float64Array(TOTAL_SAMPLES);
+// 混音緩衝與打擊樂開關（於 renderMix() 內設定）
+let mix = null;
+let drumsOn = true;
 
 // render(t) 的 t 為相對於本音的秒數（由整數 sample 計算）
 function voice(startSample, durSec, render) {
@@ -77,6 +80,17 @@ function voice(startSample, durSec, render) {
     const idx = startSample + i;
     if (idx >= TOTAL_SAMPLES) break;
     mix[idx] += render(i / SR);
+  }
+}
+
+// 打擊樂專用：關閉時仍呼叫 render 以消耗相同的 PRNG 序列，使其他樂器的隨機值與含鼓版逐位元相同
+function drumVoice(startSample, durSec, render) {
+  const n = Math.ceil(durSec * SR);
+  for (let i = 0; i < n; i++) {
+    const idx = startSample + i;
+    if (idx >= TOTAL_SAMPLES) break;
+    const v = render(i / SR);
+    if (drumsOn) mix[idx] += v;
   }
 }
 
@@ -90,7 +104,7 @@ function hz(name) {
 // ---------- 樂器 ----------
 function kick(start, gain) {
   let phase = 0;
-  voice(start, 0.3, (t) => {
+  drumVoice(start, 0.3, (t) => {
     const f = 45 + 105 * Math.exp(-t * 28); // 150 Hz → 45 Hz 的頻率掃掠
     phase += (2 * Math.PI * f) / SR;
     const body = Math.sin(phase) * Math.exp(-t * 14);
@@ -101,7 +115,7 @@ function kick(start, gain) {
 
 function snare(start, gain) {
   const hp = makeHP(900);
-  voice(start, 0.25, (t) => {
+  drumVoice(start, 0.25, (t) => {
     const n = hp(noise());
     const tone = Math.sin(2 * Math.PI * 180 * t) * Math.exp(-t / 0.05);
     return gain * (0.6 * n * Math.exp(-t / 0.055) + 0.5 * tone);
@@ -112,13 +126,13 @@ function hat(start, gain, open = false) {
   const hp = makeHP(6000);
   const decay = open ? 0.045 : 0.008;
   const len = open ? 0.15 : 0.03;
-  voice(start, len, (t) => gain * hp(noise()) * Math.exp(-t / decay));
+  drumVoice(start, len, (t) => gain * hp(noise()) * Math.exp(-t / decay));
 }
 
 function clap(start, gain) {
   const hp = makeHP(900);
   const lp = makeLP(4000);
-  voice(start, 0.2, (t) => {
+  drumVoice(start, 0.2, (t) => {
     const n = lp(hp(noise()));
     let env = 0;
     for (const off of [0, 0.011, 0.022]) {
@@ -200,7 +214,7 @@ function sweep(startSample, endSample, gain) {
 
 function crash(start, gain) {
   const hp = makeHP(2500);
-  voice(start, 2.0, (t) => gain * hp(noise()) * Math.exp(-t / 0.7));
+  drumVoice(start, 2.0, (t) => gain * hp(noise()) * Math.exp(-t / 0.7));
 }
 
 // ---------- 編曲資料 ----------
@@ -311,23 +325,41 @@ function playBar(bar) {
 }
 
 // ---------- 合成與輸出 ----------
-for (let bar = 0; bar < BARS; bar++) playBar(bar);
+// 單次渲染（PRNG 每次從同一種子開始，輸出可重現）
+function renderMix(drums) {
+  mix = new Float64Array(TOTAL_SAMPLES);
+  rand = mulberry32(SEED);
+  drumsOn = drums;
+  for (let bar = 0; bar < BARS; bar++) playBar(bar);
 
-// 結尾淡出 30 ms，避免截斷爆音
-{
+  // 結尾淡出 30 ms，避免截斷爆音
   const fadeLen = Math.round(0.03 * SR);
   for (let i = 0; i < fadeLen; i++) {
     mix[TOTAL_SAMPLES - 1 - i] *= i / fadeLen;
   }
+  return mix;
 }
 
-// 正規化到峰值 → tanh 軟削波 → 峰值 -1 dBFS
-let peak = 0;
-for (let i = 0; i < TOTAL_SAMPLES; i++) peak = Math.max(peak, Math.abs(mix[i]));
-const norm = Math.tanh(DRIVE);
-const out = new Float64Array(TOTAL_SAMPLES);
-for (let i = 0; i < TOTAL_SAMPLES; i++) {
-  out[i] = (Math.tanh((DRIVE * mix[i]) / peak) / norm) * PEAK;
+function peakOf(x) {
+  let p = 0;
+  for (let i = 0; i < x.length; i++) p = Math.max(p, Math.abs(x[i]));
+  return p;
+}
+
+// 渲染成品取樣（mono、22050 Hz，Float64Array，值域約 -1..1）。
+// 正規化到峰值 → tanh 軟削波 → 峰值 -1 dBFS。
+// drums:false 沿用含鼓版的增益（以含鼓版峰值為除數），讓兩版的響度關係一致。
+export function renderSong({ drums = true } = {}) {
+  const fullMix = renderMix(true);
+  const peak = peakOf(fullMix);
+  const src = drums ? fullMix : renderMix(false);
+  const norm = Math.tanh(DRIVE);
+  // 用 Float64Array 保留與原版完全相同的精度（Float32 會使 16-bit 量化差 1 LSB）
+  const out = new Float64Array(TOTAL_SAMPLES);
+  for (let i = 0; i < TOTAL_SAMPLES; i++) {
+    out[i] = (Math.tanh((DRIVE * src[i]) / peak) / norm) * PEAK;
+  }
+  return out;
 }
 
 function encodeWav(samples, sampleRate) {
@@ -353,20 +385,35 @@ function encodeWav(samples, sampleRate) {
   return buf;
 }
 
-const meta = {
-  title: '霓虹步伐 Neon Step',
-  bpm: BPM,
-  offsetMs: 0,
-  beatsPerBar: BEATS_PER_BAR,
-  bars: BARS,
-  durationSec: TOTAL_BEATS * 60 / BPM,
-  sampleRate: SR,
-};
+// 僅在直接執行時寫檔（import 時不產生任何副作用）
+const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  const out = renderSong({ drums: false });
 
-mkdirSync(OUT_DIR, { recursive: true });
-writeFileSync(WAV_PATH, encodeWav(out, SR));
-writeFileSync(JSON_PATH, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+  const meta = {
+    title: '霓虹步伐 Neon Step（去鼓伴奏版）',
+    bpm: BPM,
+    offsetMs: 0,
+    beatsPerBar: BEATS_PER_BAR,
+    bars: BARS,
+    durationSec: TOTAL_BEATS * 60 / BPM,
+    sampleRate: SR,
+    drums: false,
+    // 人工標註的段落（小節為單位，endBar 不含）；遊戲優先採用（DESIGN-BEATSNAP §8）
+    sections: [
+      { startBar: 0, endBar: 4, intensity: 'low', name: 'intro' },
+      { startBar: 4, endBar: 12, intensity: 'mid', name: 'verse' },
+      { startBar: 12, endBar: 20, intensity: 'high', name: 'chorus' },
+      { startBar: 20, endBar: 24, intensity: 'low', name: 'breakdown' },
+      { startBar: 24, endBar: 32, intensity: 'high', name: 'final' },
+    ],
+  };
 
-console.log(`wrote ${WAV_PATH}`);
-console.log(`wrote ${JSON_PATH}`);
-console.log(`samples=${TOTAL_SAMPLES} duration=${(TOTAL_SAMPLES / SR).toFixed(6)}s peak=${(PEAK).toFixed(4)}`);
+  mkdirSync(OUT_DIR, { recursive: true });
+  writeFileSync(WAV_PATH, encodeWav(out, SR));
+  writeFileSync(JSON_PATH, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+
+  console.log(`wrote ${WAV_PATH}`);
+  console.log(`wrote ${JSON_PATH}`);
+  console.log(`samples=${TOTAL_SAMPLES} duration=${(TOTAL_SAMPLES / SR).toFixed(6)}s peak=${peakOf(out).toFixed(4)} (drums=false)`);
+}

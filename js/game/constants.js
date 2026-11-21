@@ -19,4 +19,4 @@ export const COLORS = {
   panel: 'rgba(10,4,32,0.62)',
 };
 
-export const JUDGE_COLORS = { perfect: COLORS.perfect, great: COLORS.great, good: COLORS.good, auto: COLORS.auto };
+export const JUDGE_COLORS = { perfect: COLORS.perfect, great: COLORS.great, good: COLORS.good, off: COLORS.auto, auto: COLORS.auto };
