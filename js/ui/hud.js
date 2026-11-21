@@ -144,7 +144,7 @@ function drawDrumScore(ctx, game, cond, vst, b, pulse, cs) {
   collectHits(game, vst, tickDur);
 
   // panel
-  ctx.fillStyle = 'rgba(8,2,28,0.62)';
+  ctx.fillStyle = 'rgba(8,2,28,0.8)';
   ctx.beginPath(); roundRectPath(ctx, px0, top, panelW, ph, 12); ctx.fill();
   ctx.strokeStyle = 'rgba(160,120,255,0.4)'; ctx.lineWidth = 1.5; ctx.stroke();
   // lane bands
