@@ -3,8 +3,15 @@ const MAX_LOG = 5000;
 
 const logs = { attack: [], beat: [], world: [], metronome: [] };
 
+let appRef = null;
+
 /** Append to a log, dropping the oldest entries beyond MAX_LOG. */
 export function pushLog(name, entry) {
+  // Metronome entries are pushed synchronously from the engine's onClick right after the click was
+  // scheduled; attach the ctx.currentTime the engine read for that click if the caller did not.
+  if (name === 'metronome' && entry.ctxNowAtSchedule === undefined && appRef && appRef.engine) {
+    entry.ctxNowAtSchedule = appRef.engine.lastClickCtxNow;
+  }
   const arr = logs[name];
   arr.push(entry);
   if (arr.length > MAX_LOG) arr.splice(0, arr.length - MAX_LOG);
@@ -17,6 +24,7 @@ export function clearLogs() {
 const copy = (arr) => arr.map((e) => ({ ...e }));
 
 export function installDebugHook(app) {
+  appRef = app;
   const hook = {
     version: 1,
     getState() {

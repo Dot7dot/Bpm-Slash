@@ -58,7 +58,7 @@ const HELP = `rhythm-audit：BPM Slash 節奏對拍稽核
   --skip-browser    略過 Part B
   --skip-wav        略過 Part A
   --json <path>     輸出機器可讀的 JSON 報告
-  --quick           Part B 只跑 88 half 與 120 half
+  --quick           Part B 只跑 88 half、120 half、120 strict
   --shots <dir>     每個設定存一張截圖
   --bars <n>        每個設定連按的小節數（預設 4）
   --seed <n>        PRNG 種子
@@ -369,6 +369,7 @@ export function analyzeRun(data, cfg) {
   const grace = (cfg.lateGraceMs ?? 40) / 1000;
   const { attacks = [], beats = [], world = [], metro = [], state = {}, errors = [] } = data;
   const LAG = 0.040;
+  const strict = grace === 0;
 
   // 0. 設定是否生效
   if (state && Number.isFinite(state.bpm)) {
@@ -441,6 +442,40 @@ export function analyzeRun(data, cfg) {
     if (clampShare > 0.25) c.add('B2c', 'sfxClamped 比例偏高', 'WARN', `非 late 攻擊中 ${(clampShare * 100).toFixed(1)}% 被 clamp（> 25%）`);
   }
 
+  // 2s. 嚴格模式：不得 clamp、不得 late（§5.2 / §11.8）
+  if (strict) {
+    const clamped = attacks.filter((a) => a.sfxClamped === true);
+    const late = attacks.filter((a) => a.late === true);
+    c.check('B2s', '嚴格模式：sfxClamped 永遠為 false、沒有 late 攻擊', attacks.length > 0 && clamped.length === 0 && late.length === 0,
+      `攻擊 ${attacks.length} 次，sfxClamped=${clamped.length}，late=${late.length}${clamped.length ? '；' + firstN(clamped.map((a) => '#' + a.id)) : ''}`,
+      { attacks: attacks.length, clamped: clamped.length, late: late.length });
+  }
+
+  // 2t. 排程領先量：scheduledAudioTime − ctxNowAtSchedule ≥ 0（排在未來 → Web Audio 取樣精準播放）
+  {
+    const leads = []; const bad = []; let missing = 0;
+    for (const a of attacks) {
+      if (a.sfxClamped === true) continue;
+      if (!Number.isFinite(a.ctxNowAtSchedule)) { missing++; continue; }
+      const lead = a.scheduledAudioTime - a.ctxNowAtSchedule;
+      leads.push(lead);
+      if (!(lead >= -1e-9)) bad.push(`attack#${a.id}: lead=${ms(lead, 3)}ms < 0`);
+    }
+    const mleads = [];
+    let mMissing = 0;
+    for (const m of metro) {
+      if (!Number.isFinite(m.ctxNowAtSchedule)) { mMissing++; continue; }
+      const lead = m.scheduledAudioTime - m.ctxNowAtSchedule;
+      mleads.push(lead);
+      if (!(lead >= -1e-9)) bad.push(`click beat ${m.beatIndex}: lead=${ms(lead, 3)}ms < 0`);
+    }
+    const sa = stats(leads); const sm = stats(mleads);
+    const detail = `未 clamp 攻擊 n=${leads.length}：最小領先 ${ms(sa.min, 2)} ms（p50 ${ms(sa.p50, 1)}）；節拍器 n=${mleads.length}：最小領先 ${ms(sm.min, 2)} ms（p50 ${ms(sm.p50, 1)}）${bad.length ? '；' + firstN(bad) : ''}`;
+    const metrics = { attackMinLeadMs: sa.min * 1000, metroMinLeadMs: sm.min * 1000, nAttack: leads.length, nMetro: mleads.length };
+    if (missing || mMissing || (!leads.length && !mleads.length)) c.add('B2t', 'scheduledAudioTime − ctxNowAtSchedule ≥ 0', 'WARN', `缺少 ctxNowAtSchedule 欄位（攻擊 ${missing} 筆、節拍器 ${mMissing} 筆）；${detail}`, metrics);
+    else c.check('B2t', 'scheduledAudioTime − ctxNowAtSchedule ≥ 0（非 clamped 攻擊與節拍器）', bad.length === 0, detail, metrics);
+  }
+
   // 3. slot 選擇正確性（重跑 §6.1）與佇列
   {
     const bad = []; const warn = [];
@@ -448,7 +483,9 @@ export function analyzeRun(data, cfg) {
     for (let i = 0; i < attacks.length; i++) {
       const a = attacks[i];
       const ref = quantizeRef({ inputSongTime: a.inputSongTime, bpm, mode: cfg.quantizeMode, lateGraceSec: grace, minSlotIndex: minSlot });
-      if (ref.slotIndex !== a.slotIndex) {
+      if (strict && a.slotIndex > ref.slotIndex && !a.late) {
+        // 嚴格模式：為了保證音效不被 clamp，slot 可以比純量化結果更晚（§5.2），由 B2s/B2t 驗證其排程。
+      } else if (ref.slotIndex !== a.slotIndex) {
         const edge = Math.abs((a.inputSongTime - Math.floor(a.inputSongTime / halfStep) * halfStep) - grace);
         const msg = `#${a.id}: input=${f(a.inputSongTime, 4)}s 遊戲 slot=${a.slotIndex}，參考 slot=${ref.slotIndex}(minSlot=${minSlot})`;
         (edge < 2e-5 ? warn : bad).push(msg);
@@ -610,7 +647,7 @@ async function runConfig(browser, baseUrl, cfg, opts) {
 
     await call('setInvincible', true);
     await call('clearLogs');
-    await withTimeout(call('start', { bpm: cfg.bpm, quantizeMode: cfg.quantizeMode, lateGraceMs: 40 }), 30000, 'start()');
+    await withTimeout(call('start', { bpm: cfg.bpm, quantizeMode: cfg.quantizeMode, lateGraceMs: cfg.lateGraceMs ?? 40 }), 30000, 'start()');
     const beatDur = 60 / cfg.bpm;
 
     // 等待進入 playing
@@ -672,6 +709,112 @@ async function runConfig(browser, baseUrl, cfg, opts) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Part B 的離線渲染驗證（B9 / B9b）：用 OfflineAudioContext 渲染遊戲自己的音效，量測真實發聲 onset
+// ---------------------------------------------------------------------------
+/** 在頁面內執行：渲染各攻擊種類與 click，回傳原始樣本供 Node 端偵測 onset。 */
+async function renderSfxInPage({ baseUrl }) {
+  const { SfxVoices } = await import(new URL('js/audio/sfxVoices.js', baseUrl).href);
+  const SR = 44100;
+  const kinds = ['front', 'down', 'back', 'combo8', 'finisher', 'click-accent', 'click-normal'];
+  const t0 = 0.5; const gap = 0.7;
+  const off = new OfflineAudioContext(1, Math.ceil(SR * (t0 + gap * kinds.length + 0.5)), SR);
+  const v = new SfxVoices(off, { sfx: off.destination, click: off.destination });
+  const events = kinds.map((k, i) => ({ kind: k, t: t0 + gap * i + 0.00037 * (i + 1) }));
+  for (const e of events) {
+    if (e.kind === 'click-accent') v.click(e.t, true);
+    else if (e.kind === 'click-normal') v.click(e.t, false);
+    else v.attack(e.kind, e.t);
+  }
+  const buf = await off.startRendering();
+  return { sr: SR, events, samples: Array.from(buf.getChannelData(0)) };
+}
+
+/** B9b：預設曲 + 節拍器（beat0 = 0）。回傳 mix 與純音樂兩份渲染（click = mix − music）。 */
+async function renderMixInPage({ baseUrl, bpm, offsetMs, seconds }) {
+  const { SfxVoices } = await import(new URL('js/audio/sfxVoices.js', baseUrl).href);
+  const resp = await fetch(new URL('assets/audio/default-88bpm.wav', baseUrl).href);
+  const arr = await resp.arrayBuffer();
+  const SR = 44100;
+  const dec = await new OfflineAudioContext(1, 1, SR).decodeAudioData(arr);
+  const beatDur = 60 / bpm;
+  const nBeats = Math.floor(seconds / beatDur);
+  const render = async (withClicks) => {
+    const off = new OfflineAudioContext(1, Math.ceil(SR * seconds), SR);
+    const src = off.createBufferSource();
+    src.buffer = dec; src.connect(off.destination);
+    src.start(0 - offsetMs / 1000, offsetMs / 1000 > 0 ? 0 : 0); // beat0AudioTime=0 → source.start(beat0 - offset)
+    if (withClicks) {
+      const v = new SfxVoices(off, { sfx: off.destination, click: off.destination });
+      for (let n = 0; n < nBeats; n++) v.click(n * beatDur, n % 4 === 0);
+    }
+    return Array.from((await off.startRendering()).getChannelData(0));
+  };
+  const mix = await render(true);
+  const music = await render(false);
+  return { sr: SR, bpm, nBeats, beatDur, mix, music };
+}
+
+/** 偵測 onset：視窗 [t−3ms, t+60ms]，第一個 |x| ≥ frac × 視窗峰值 的樣本時間。回傳秒。 */
+export function detectOnset(x, sr, t, frac = 0.1, pre = 0.003, post = 0.06) {
+  const i0 = Math.max(0, Math.floor((t - pre) * sr));
+  const i1 = Math.min(x.length, Math.ceil((t + post) * sr));
+  let peak = 0;
+  for (let i = i0; i < i1; i++) peak = Math.max(peak, Math.abs(x[i]));
+  if (peak < 1e-4) return NaN;
+  const thr = frac * peak;
+  for (let i = i0; i < i1; i++) if (Math.abs(x[i]) >= thr) return i / sr;
+  return NaN;
+}
+
+async function runOfflineAudit(browser, baseUrl) {
+  const checks = [];
+  const context = await browser.newContext({ viewport: { width: 960, height: 540 } });
+  const page = await context.newPage();
+  try {
+    await page.goto(baseUrl, { waitUntil: 'load', timeout: 20000 });
+    // B9
+    const r = await page.evaluate(renderSfxInPage, { baseUrl });
+    const rows = r.events.map((e) => {
+      const on = detectOnset(r.samples, r.sr, e.t);
+      return { kind: e.kind, errMs: (on - e.t) * 1000 };
+    });
+    const bad = rows.filter((x) => !(Math.abs(x.errMs) <= 2));
+    checks.push({
+      id: 'B9', name: 'OfflineAudioContext 渲染：各攻擊音效與節拍器 click 的真實 onset 與排定時間差 ≤ 2 ms（10% 峰值偵測）',
+      status: bad.length === 0 ? 'PASS' : 'FAIL',
+      detail: rows.map((x) => `${x.kind}=${f(x.errMs, 3)}ms`).join('  ') + (bad.length ? `；超標：${bad.map((x) => x.kind).join(',')}` : ''),
+      metrics: { onsetErrMs: Object.fromEntries(rows.map((x) => [x.kind, x.errMs])) },
+    });
+    // B9b
+    const bpm = 88;
+    const m = await page.evaluate(renderMixInPage, { baseUrl, bpm, offsetMs: 0, seconds: 4.2 });
+    const resid = new Float32Array(m.mix.length);
+    for (let i = 0; i < resid.length; i++) resid[i] = m.mix[i] - m.music[i];
+    const errs = [];
+    for (let n = 0; n < m.nBeats; n++) errs.push((detectOnset(resid, m.sr, n * m.beatDur, 0.1, 0, 0.04) - n * m.beatDur) * 1000);
+    const st = stats(errs.map((e) => Math.abs(e)));
+    // 音樂本身：鼓的 onset 與 beat 網格（混音內，beat0=0）— 取每一拍視窗內的第一個 10% 峰值樣本
+    const mErrs = [];
+    for (let n = 0; n < m.nBeats; n++) {
+      const on = detectOnset(m.music, m.sr, n * m.beatDur, 0.1, 0, 0.03);
+      if (Number.isFinite(on)) mErrs.push((on - n * m.beatDur) * 1000);
+    }
+    const ms2 = stats(mErrs.map((e) => Math.abs(e)));
+    checks.push({
+      id: 'B9b', name: '預設曲 + 節拍器（beat0=0, offset 0）混音渲染：每個 click onset 與排定拍點差 ≤ 2 ms（click = mix − music）',
+      status: errs.length > 0 && errs.every((e) => Number.isFinite(e) && Math.abs(e) <= 2) ? 'PASS' : 'FAIL',
+      detail: `${errs.length} 個 click：|onset−beat| 平均 ${f(st.mean, 3)} / max ${f(st.max, 3)} ms；同一時間線上的音樂拍點 onset（參考）：n=${mErrs.length} 平均 ${f(ms2.mean, 2)} / max ${f(ms2.max, 2)} ms`,
+      metrics: { clickErrMaxMs: st.max, clickErrMeanMs: st.mean, musicOnsetMeanMs: ms2.mean },
+    });
+  } catch (e) {
+    checks.push({ id: 'B9', name: '離線渲染驗證', status: 'FAIL', detail: e.message });
+  } finally {
+    await context.close().catch(() => {});
+  }
+  return { config: { bpm: 'n/a', quantizeMode: 'offline-render', lateGraceMs: '-' }, checks, data: null, fatal: null };
+}
+
 async function runBrowserPart(opts, baseUrl) {
   const pw = loadPlaywright();
   if (!pw) {
@@ -684,14 +827,19 @@ async function runBrowserPart(opts, baseUrl) {
     return { status: 'SKIPPED', reason: `無法啟動 Chromium：${e.message.split('\n')[0]}（可試 npx playwright install chromium）`, configs: [] };
   }
   const matrix = opts.quick
-    ? [{ bpm: 88, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half' }]
-    : [{ bpm: 88, quantizeMode: 'half' }, { bpm: 88, quantizeMode: 'beat' }, { bpm: 72.5, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half' }, { bpm: 150, quantizeMode: 'half' }];
+    ? [{ bpm: 88, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half', lateGraceMs: 0 }]
+    : [{ bpm: 88, quantizeMode: 'half' }, { bpm: 88, quantizeMode: 'beat' }, { bpm: 72.5, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half' }, { bpm: 150, quantizeMode: 'half' },
+      { bpm: 40, quantizeMode: 'half' }, { bpm: 240, quantizeMode: 'half' }, { bpm: 120, quantizeMode: 'half', lateGraceMs: 0 }];
   const configs = [];
   try {
     for (const cfg of matrix) {
-      console.error(`… 執行 bpm=${cfg.bpm} mode=${cfg.quantizeMode}（約 ${Math.round(opts.bars * 4 * 60 / cfg.bpm + 4 * 60 / cfg.bpm + 4)} 秒）`);
-      configs.push(await runConfig(browser, baseUrl, { ...cfg, lateGraceMs: 40 }, opts));
+      // 慢速曲（40 BPM）縮減小節數，但至少 2 小節；窗口上限約 24 秒
+      const bars = Math.max(2, Math.min(opts.bars, Math.floor(24 / (4 * 60 / cfg.bpm))));
+      const lg = cfg.lateGraceMs ?? 40;
+      console.error(`… 執行 bpm=${cfg.bpm} mode=${cfg.quantizeMode} lateGraceMs=${lg}（${bars} 小節，約 ${Math.round(bars * 4 * 60 / cfg.bpm + 4 * 60 / cfg.bpm + 4)} 秒）`);
+      configs.push(await runConfig(browser, baseUrl, { ...cfg, lateGraceMs: lg }, { ...opts, bars }));
     }
+    configs.push(await runOfflineAudit(browser, baseUrl));
   } finally {
     await browser.close().catch(() => {});
   }
@@ -766,7 +914,7 @@ async function main() {
           for (const r of b.configs) {
             const cfgFail = r.checks.some((x) => x.status === 'FAIL');
             if (cfgFail) partFail = true;
-            console.log(`\n### bpm=${r.config.bpm}  mode=${r.config.quantizeMode}  → ${cfgFail ? 'FAIL' : 'PASS'}`);
+            console.log(`\n### bpm=${r.config.bpm}  mode=${r.config.quantizeMode}  grace=${r.config.lateGraceMs}ms  → ${cfgFail ? 'FAIL' : 'PASS'}`);
             printChecks(r.checks);
           }
           full.parts.browser = {
@@ -785,7 +933,7 @@ async function main() {
   console.log('\n==================== 總結 ====================');
   for (const [k, v] of Object.entries(full.parts)) {
     console.log(`  ${k === 'wav' ? 'Part A (WAV)' : 'Part B (browser)'}: ${v.status}${v.reason ? ` — ${v.reason}` : ''}`);
-    if (v.configs) for (const c of v.configs) console.log(`      bpm=${c.config.bpm} ${c.config.quantizeMode}: ${c.status}`);
+    if (v.configs) for (const c of v.configs) console.log(`      bpm=${c.config.bpm} ${c.config.quantizeMode} grace=${c.config.lateGraceMs}: ${c.status}`);
   }
   full.summary = { result: anyFail ? 'FAIL' : 'PASS', exitCode: anyFail ? 1 : 0 };
   console.log(`  結果：${anyFail ? 'FAIL（有失敗項目）' : 'PASS（沒有 FAIL）'}`);

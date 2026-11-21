@@ -1,5 +1,6 @@
 // AudioEngine: AudioContext ownership, decoding, song playback, SFX synthesis, metronome scheduler.
 import { mod } from '../core/beatMath.js';
+import { SfxVoices, makeNoiseBuffer } from './sfxVoices.js';
 
 const DEFAULT_JSON = { title: '預設曲 Neon Pulse', bpm: 88, offsetMs: 0, beatsPerBar: 4, bars: 32 };
 
@@ -12,6 +13,10 @@ export class AudioEngine {
     this.clickGain = null;
     this.source = null;
     this.noiseBuf = null;
+    this.voices = null;
+    /** ctx.currentTime read immediately before the latest attack / click was scheduled. */
+    this.lastAttackCtxNow = NaN;
+    this.lastClickCtxNow = NaN;
     this._metro = null;
     this.volumes = { music: 0.8, sfx: 0.9 };
   }
@@ -38,12 +43,9 @@ export class AudioEngine {
     this.sfxGain.connect(this.master);
     this.clickGain.connect(this.master);
     this.setVolumes(this.volumes);
-    // Shared white-noise buffer for slashes etc.
-    const len = c.sampleRate;
-    this.noiseBuf = c.createBuffer(1, len, c.sampleRate);
-    const d = this.noiseBuf.getChannelData(0);
-    let seed = 12345;
-    for (let i = 0; i < len; i++) { seed = (seed * 1664525 + 1013904223) >>> 0; d[i] = seed / 2147483648 - 1; }
+    // Shared white-noise buffer + synth voices (js/audio/sfxVoices.js).
+    this.noiseBuf = makeNoiseBuffer(c);
+    this.voices = new SfxVoices(c, { sfx: this.sfxGain, click: this.clickGain }, this.noiseBuf);
     return c;
   }
 
@@ -155,7 +157,7 @@ export class AudioEngine {
    * @param {number} o.startBeat first beat index to consider
    * @param {()=>boolean} o.enabled whether beats >= 0 click
    * @param {boolean} o.forceCountIn beats < 0 always click
-   * @param {(beatIndex:number, scheduled:number, expected:number)=>void} [o.onClick]
+   * @param {(beatIndex:number, scheduled:number, expected:number, ctxNowAtSchedule:number)=>void} [o.onClick]
    */
   startMetronome(cond, { startBeat = -4, enabled = () => true, forceCountIn = true, onClick } = {}) {
     this.stopMetronome();
@@ -176,8 +178,9 @@ export class AudioEngine {
         if (expected >= now - 0.01) {
           if ((m.next < 0 && forceCountIn) || (m.next >= 0 && enabled())) {
             const when = Math.max(expected, now);
+            this.lastClickCtxNow = now;
             this.playClick(when, mod(m.next, 4) === 0);
-            if (onClick) onClick(m.next, when, expected);
+            if (onClick) onClick(m.next, when, expected, now);
           }
         }
         m.next++;
@@ -194,79 +197,21 @@ export class AudioEngine {
 
   // ---------- SFX synthesis ----------
 
-  _tone(when, { type = 'sine', f0, f1 = f0, dur = 0.1, gain = 0.3, out = this.sfxGain, attack = 0.002 }) {
-    const c = this.ctx;
-    const o = c.createOscillator();
-    const g = c.createGain();
-    o.type = type;
-    o.frequency.setValueAtTime(f0, when);
-    if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), when + dur);
-    g.gain.setValueAtTime(0.0001, when);
-    g.gain.exponentialRampToValueAtTime(gain, when + attack);
-    g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
-    o.connect(g); g.connect(out);
-    o.start(when); o.stop(when + dur + 0.02);
-  }
+  _tone(when, o) { this.voices.tone(when, o); }
+  _noise(when, o) { this.voices.noise(when, o); }
 
-  _noise(when, { f0, f1 = f0, q = 1, dur = 0.1, gain = 0.3, type = 'bandpass', out = this.sfxGain }) {
-    const c = this.ctx;
-    const s = c.createBufferSource();
-    s.buffer = this.noiseBuf;
-    s.loop = true;
-    const f = c.createBiquadFilter();
-    f.type = type;
-    f.Q.value = q;
-    f.frequency.setValueAtTime(f0, when);
-    if (f1 !== f0) f.frequency.exponentialRampToValueAtTime(Math.max(20, f1), when + dur);
-    const g = c.createGain();
-    g.gain.setValueAtTime(0.0001, when);
-    g.gain.exponentialRampToValueAtTime(gain, when + 0.004);
-    g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
-    s.connect(f); f.connect(g); g.connect(out);
-    s.start(when, Math.random() * 0.5); s.stop(when + dur + 0.02);
-  }
-
-  playClick(when, accent) {
-    this._tone(when, { type: 'sine', f0: accent ? 1760 : 1100, dur: 0.045, gain: accent ? 0.55 : 0.4, out: this.clickGain, attack: 0.001 });
-    this._tone(when, { type: 'triangle', f0: accent ? 880 : 550, dur: 0.03, gain: 0.2, out: this.clickGain, attack: 0.001 });
-  }
+  playClick(when, accent) { this.voices.click(when, accent); }
 
   /**
-   * Attack SFX scheduled on the audio clock. Returns the audio time actually used.
+   * Attack SFX scheduled on the audio clock. Returns the audio time actually passed to start().
    * kind: front | down | back | finisher | combo8
    */
   playAttack(kind, expected) {
     const ctx = this.ensure();
     const now = ctx.currentTime;
+    this.lastAttackCtxNow = now;
     const when = expected > now ? expected : now;
-    switch (kind) {
-      case 'back':
-      case 'combo8':
-        this._noise(when, { f0: 5000, f1: 9000, q: 0.8, dur: 0.07, gain: 0.32 });
-        this._tone(when, { type: 'sine', f0: 700, f1: 1900, dur: 0.09, gain: 0.3 });
-        this._tone(when, { type: 'square', f0: 1400, f1: 2400, dur: 0.05, gain: 0.05 });
-        if (kind === 'combo8') {
-          this._tone(when, { type: 'triangle', f0: 1318, dur: 0.3, gain: 0.16 });
-          this._tone(when + 0.04, { type: 'triangle', f0: 1976, dur: 0.3, gain: 0.12 });
-        }
-        break;
-      case 'down':
-      case 'finisher':
-        this._noise(when, { f0: 2600, f1: 260, q: 0.7, dur: 0.3, gain: 0.7 });
-        this._tone(when, { type: 'sawtooth', f0: 130, f1: 40, dur: 0.32, gain: 0.45 });
-        this._tone(when, { type: 'sine', f0: 70, f1: 32, dur: 0.4, gain: 0.8 });
-        this._tone(when, { type: 'triangle', f0: 440, dur: 0.32, gain: 0.11 });
-        this._tone(when, { type: 'triangle', f0: 660, dur: 0.32, gain: 0.09 });
-        if (kind === 'finisher') {
-          this._noise(when + 0.02, { f0: 900, f1: 80, q: 0.5, dur: 0.6, gain: 0.7, type: 'lowpass' });
-          this._tone(when, { type: 'sine', f0: 55, f1: 24, dur: 0.7, gain: 0.9 });
-        }
-        break;
-      default: // front
-        this._noise(when, { f0: 3200, f1: 700, q: 0.9, dur: 0.16, gain: 0.5 });
-        this._tone(when, { type: 'sine', f0: 190, f1: 60, dur: 0.14, gain: 0.6 });
-        this._tone(when, { type: 'sawtooth', f0: 330, f1: 120, dur: 0.1, gain: 0.07 });
-    }
+    this.voices.attack(kind, when);
     return when;
   }
 

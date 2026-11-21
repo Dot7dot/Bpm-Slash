@@ -70,3 +70,23 @@ export function quantizeAttack({
     late: usedPrev && deltaSec > EPS,
   };
 }
+
+/**
+ * Strict mode (DESIGN 5.2): smallest usable slot k with slotSongTime(k) >= schedNowSongTime + marginSec,
+ * i.e. a slot whose SFX can still be scheduled in the future. 'beat' mode only returns even slots.
+ * @param {object} p
+ * @param {number} p.schedNowSongTime ctx.currentTime - beat0AudioTime (scheduling-domain song time now)
+ * @param {number} p.bpm
+ * @param {'half'|'beat'} [p.mode='half']
+ * @param {number} [p.marginSec=0.005]
+ */
+export function minSchedulableSlot({ schedNowSongTime, bpm, mode = 'half', marginSec = 0.005 }) {
+  const halfStep = 30 / bpm;
+  const step = mode === 'beat' ? 2 : 1;
+  const target = schedNowSongTime + marginSec;
+  let k = Math.ceil(target / halfStep);
+  while (k * halfStep < target) k++;
+  while (k > -1e9 && (k - step) * halfStep >= target) k--; // guard against ceil overshoot
+  if (step === 2 && Math.abs(k % 2) === 1) k += 1;
+  return k;
+}

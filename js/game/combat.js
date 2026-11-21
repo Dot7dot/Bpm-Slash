@@ -1,5 +1,5 @@
 // Combat: attack queue, quantized impact frames, hit resolution, combos (DESIGN section 6).
-import { quantizeAttack, JUDGE_MULTIPLIER } from '../core/quantizer.js';
+import { quantizeAttack, minSchedulableSlot, JUDGE_MULTIPLIER } from '../core/quantizer.js';
 import { COLORS, JUDGE_COLORS } from './constants.js';
 import { pushLog } from '../debug/debugHook.js';
 
@@ -37,12 +37,21 @@ export class Combat {
     if (this.pendingCount >= 2) return null; // third press ignored
     const cond = g.conductor;
     const input = cond.inputSongTime(perfMs);
+    // Strict mode (lateGraceMs === 0, DESIGN 5.2): never let the SFX be clamped to "now";
+    // require the slot to be schedulable at least 5 ms in the future. Judgment stays relative to the chosen slot.
+    let minSlotIndex = this.lastSlot + 1;
+    if (g.settings.lateGraceMs === 0) {
+      const ctxNow = g.engine.ensure().currentTime;
+      minSlotIndex = Math.max(minSlotIndex, minSchedulableSlot({
+        schedNowSongTime: ctxNow - cond.beat0AudioTime, bpm: cond.bpm, mode: g.settings.quantizeMode, marginSec: 0.005,
+      }));
+    }
     const q = quantizeAttack({
       inputSongTime: input,
       bpm: cond.bpm,
       mode: g.settings.quantizeMode,
       lateGraceSec: g.settings.lateGraceMs / 1000,
-      minSlotIndex: this.lastSlot + 1,
+      minSlotIndex,
     });
     this.lastSlot = q.slotIndex;
     const res = g.combo.registerAttack(q);
@@ -53,8 +62,9 @@ export class Combat {
 
     const expectedAudioTime = cond.beat0AudioTime + q.slotSongTime;
     const sfxKind = kind;
-    const sfxClamped = expectedAudioTime < g.engine.ensure().currentTime;
     const scheduledAudioTime = g.engine.playAttack(sfxKind, expectedAudioTime);
+    const ctxNowAtSchedule = g.engine.lastAttackCtxNow; // ctx.currentTime read right before scheduling
+    const sfxClamped = expectedAudioTime < ctxNowAtSchedule;
 
     const prev = this.queue.length ? this.queue[this.queue.length - 1] : null;
     const attack = {
@@ -67,7 +77,7 @@ export class Combat {
     const entry = {
       id: attack.id, inputSongTime: input, slotIndex: q.slotIndex, slotSongTime: q.slotSongTime,
       half: q.half, isDownbeat: q.isDownbeat, deltaSec: q.deltaSec, judgment: q.judgment, late: q.late,
-      sfxClamped, scheduledAudioTime, expectedAudioTime, impactSongTime: null,
+      sfxClamped, scheduledAudioTime, expectedAudioTime, ctxNowAtSchedule, impactSongTime: null,
     };
     attack.log = entry;
     pushLog('attack', entry);

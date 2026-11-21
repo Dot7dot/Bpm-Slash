@@ -142,3 +142,45 @@ test('negative times quantize correctly (count-in)', () => {
   // -3.3 slots: prev=-4 is 0.7*h = 0.2386 late (beyond grace), so next = -3
   assert.equal(q.slotIndex, -3);
 });
+
+import { minSchedulableSlot } from '../js/core/quantizer.js';
+
+test('minSchedulableSlot: smallest slot at least marginSec in the future', () => {
+  for (const bpm of [40, 72.5, 88, 120, 240]) {
+    const h = 30 / bpm;
+    for (let i = 0; i < 400; i++) {
+      const now = -2 + i * 0.0173;
+      for (const mode of ['half', 'beat']) {
+        const k = minSchedulableSlot({ schedNowSongTime: now, bpm, mode, marginSec: 0.005 });
+        const step = mode === 'beat' ? 2 : 1;
+        assert.ok(k * h >= now + 0.005, `bpm ${bpm} now ${now} ${mode}`);
+        assert.ok((k - step) * h < now + 0.005, `not minimal: bpm ${bpm} now ${now} ${mode}`);
+        if (mode === 'beat') assert.equal(Math.abs(k % 2), 0);
+      }
+    }
+  }
+});
+
+test('minSchedulableSlot: exact boundary and default margin', () => {
+  const h = 30 / 120;
+  assert.equal(minSchedulableSlot({ schedNowSongTime: 4 * h - 0.0049, bpm: 120 }), 5);
+  assert.equal(minSchedulableSlot({ schedNowSongTime: 4 * h - 0.0051, bpm: 120 }), 4);
+  assert.equal(minSchedulableSlot({ schedNowSongTime: 4 * h - 0.004, bpm: 120 }), 5);
+  assert.equal(minSchedulableSlot({ schedNowSongTime: 4 * h - 0.004, bpm: 120, mode: 'beat' }), 6);
+});
+
+test('strict mode: quantizeAttack with minSchedulableSlot never lands in the past', () => {
+  for (const bpm of [40, 120, 240]) {
+    const h = 30 / bpm;
+    for (let i = 0; i < 500; i++) {
+      const now = i * 0.0113;
+      const input = now - 0.03; // heard-domain input is slightly behind the schedule clock
+      const q = quantizeAttack({
+        inputSongTime: input, bpm, lateGraceSec: 0,
+        minSlotIndex: minSchedulableSlot({ schedNowSongTime: now, bpm }),
+      });
+      assert.ok(q.slotIndex * h >= now + 0.005);
+      assert.equal(q.late, false);
+    }
+  }
+});
