@@ -1,5 +1,6 @@
 // Conductor: the single master clock (DESIGN section 5).
 // Beat truth comes only from AudioContext time. Never from setTimeout / Date.now / accumulated dt.
+import { heardAudioTime } from '../core/clockMath.js';
 import { clampBpm, EPS, beatInBarOf, barIndexOf, slotHalf } from '../core/beatMath.js';
 
 export class Conductor {
@@ -48,47 +49,48 @@ export class Conductor {
   onHalf(fn) { this.halfListeners.push(fn); return () => { this.halfListeners = this.halfListeners.filter((f) => f !== fn); }; }
   clearListeners() { this.beatListeners = []; this.halfListeners = []; }
 
-  /** Smoothed audio time (DESIGN 5.1). Falls back to ctx.currentTime when unsupported / suspended. */
-  audioNow() {
+  /** Heard-domain audio time of a performance.now() timestamp (DESIGN 5.1). Latency is applied exactly once here. */
+  heardAudioTimeOf(perfMs) {
     const ctx = this.engine.ctx;
     if (!ctx) return 0;
-    const cur = ctx.currentTime;
-    if (ctx.state !== 'running') return cur;
-    const v = this._fromTimestamp(performance.now(), cur);
-    // Never go backwards (jitter in getOutputTimestamp).
+    let ts = null;
+    try { ts = ctx.getOutputTimestamp ? ctx.getOutputTimestamp() : null; } catch (e) { ts = null; }
+    return heardAudioTime({
+      contextTime: ts ? ts.contextTime : 0,
+      performanceTime: ts ? ts.performanceTime : 0,
+      currentTime: ctx.currentTime,
+      outputLatency: this.engine.outputLatency,
+      perfMs, nowPerfMs: performance.now(), state: ctx.state,
+    });
+  }
+
+  /** Heard-domain "now", smoothed so it never goes backwards (all values are in the heard domain). */
+  heardAudioNow() {
+    const ctx = this.engine.ctx;
+    if (!ctx) return 0;
+    const v = this.heardAudioTimeOf(performance.now()).time;
+    // Never go backwards (jitter in getOutputTimestamp); real seeks/jumps (> 50 ms) pass through.
     if (v < this._lastSmooth && this._lastSmooth - v < 0.05) return this._lastSmooth;
     this._lastSmooth = v;
     return v;
   }
 
-  /** Convert a performance.now()-domain time (e.g. event.timeStamp) to audio time. */
-  audioTimeFromPerf(perfMs) {
-    const ctx = this.engine.ctx;
-    if (!ctx) return 0;
-    return this._fromTimestamp(perfMs, ctx.currentTime);
-  }
+  /** Heard-domain audio time of an event timestamp (performance.now domain). */
+  audioTimeFromPerf(perfMs) { return this.heardAudioTimeOf(perfMs).time; }
+  /** Alias kept for the debug hook: heard-domain now. */
+  audioNow() { return this.heardAudioNow(); }
 
-  _fromTimestamp(perfMs, fallback) {
-    const ctx = this.engine.ctx;
-    let ts = null;
-    try { ts = ctx.getOutputTimestamp ? ctx.getOutputTimestamp() : null; } catch (e) { ts = null; }
-    if (!ts || !(ts.contextTime > 0) || !(ts.performanceTime > 0)) return fallback;
-    const v = ts.contextTime + (perfMs - ts.performanceTime) / 1000;
-    if (!Number.isFinite(v) || Math.abs(v - fallback) > 0.25) return fallback;
-    return v;
-  }
-
-  /** Heard-domain song time for an audio time. */
-  heardSongTime(audioTime) { return audioTime - this.outputLatency - this.beat0AudioTime; }
+  /** Song time for a heard-domain audio time (latency already applied once in heardAudioTimeOf). */
+  heardSongTime(heardAudio) { return heardAudio - this.beat0AudioTime; }
   /** Scheduling-domain song time. */
   schedSongTime(audioTime) { return audioTime - this.beat0AudioTime; }
   audioTimeOfSongTime(songTime) { return this.beat0AudioTime + songTime; }
 
-  visualSongTime() { return this.heardSongTime(this.audioNow()); }
+  visualSongTime() { return this.heardSongTime(this.heardAudioNow()); }
 
   /** Input song time for an event timestamp (performance.now domain). Includes user calibration. */
   inputSongTime(perfMs) {
-    return this.heardSongTime(this.audioTimeFromPerf(perfMs)) - this.inputCalibrationSec;
+    return this.heardSongTime(this.heardAudioTimeOf(perfMs).time) - this.inputCalibrationSec;
   }
 
   /**

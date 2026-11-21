@@ -17,8 +17,19 @@ export class Effects {
     if (this.particles.length > 600) this.particles.splice(0, this.particles.length - 600);
   }
 
-  text(x, y, str, { color = '#fff', size = 22, life = 0.8, rise = 40, sub = null, subColor = null } = {}) {
-    this.texts.push({ x, y, str, color, size, life, max: life, rise, sub, subColor: subColor || color });
+  /**
+   * Floating text. With `channel`, at most one live text per channel exists: a new one makes the
+   * previous one fade out quickly in place, so popups never pile up at fast tempos.
+   */
+  text(x, y, str, { color = '#fff', size = 22, life = 0.8, rise = 40, sub = null, subColor = null, channel = null } = {}) {
+    if (channel) {
+      for (const t of this.texts) {
+        if (t.channel === channel && t.frozenK === undefined) {
+          t.frozenK = 1 - t.life / t.max; t.life = 0.09; t.fadeMax = 0.09;
+        }
+      }
+    }
+    this.texts.push({ x, y, str, color, size, life, max: life, rise, sub, subColor: subColor || color, channel });
     if (this.texts.length > 40) this.texts.shift();
   }
 
@@ -95,9 +106,10 @@ export class Effects {
     ctx.save();
     ctx.textAlign = 'center';
     for (const t of this.texts) {
-      const k = 1 - t.life / t.max;
+      const dying = t.frozenK !== undefined;
+      const k = dying ? t.frozenK : 1 - t.life / t.max;
       const pop = k < 0.12 ? 0.7 + (k / 0.12) * 0.5 : 1.2 - Math.min(0.2, (k - 0.12) * 0.5);
-      ctx.globalAlpha = k > 0.7 ? 1 - (k - 0.7) / 0.3 : 1;
+      ctx.globalAlpha = (k > 0.7 ? 1 - (k - 0.7) / 0.3 : 1) * (dying ? t.life / t.fadeMax : 1);
       const y = t.y - t.rise * (1 - Math.pow(1 - k, 2));
       ctx.font = `800 ${Math.round(t.size * pop)}px ${FONT}`;
       ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(8,2,28,0.85)'; ctx.lineJoin = 'round';

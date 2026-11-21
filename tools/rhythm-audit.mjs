@@ -402,28 +402,43 @@ export function analyzeRun(data, cfg) {
 
   // 2. 排程時間與 late / delta / 判定
   {
-    const bad = []; const schedErr = [];
-    let nLate = 0;
+    const bad = []; const schedErr = []; const clampedErr = [];
+    let nLate = 0; let nClamped = 0; let nNonLate = 0; let nMissingFlag = 0;
+    const outLat = Number.isFinite(state && state.outputLatency) ? state.outputLatency : 0;
     for (const a of attacks) {
       const problems = [];
       const d = a.inputSongTime - a.slotSongTime;
       if (Math.abs(a.deltaSec - d) > 1e-6) problems.push(`deltaSec=${ms(a.deltaSec, 3)}ms ≠ input-slot=${ms(d, 3)}ms`);
+      const diff = a.scheduledAudioTime - a.expectedAudioTime;
+      const hasFlag = typeof a.sfxClamped === 'boolean';
+      if (!hasFlag) nMissingFlag++;
       if (a.late) {
         nLate++;
         if (!(a.deltaSec > -1e-9 && a.deltaSec <= grace + 1e-6)) problems.push(`late 但 deltaSec=${ms(a.deltaSec, 3)}ms 不在 (0, ${ms(grace, 1)}ms]`);
       } else {
+        nNonLate++;
         if (a.deltaSec > 1e-6) problems.push(`非 late 但 deltaSec=${ms(a.deltaSec, 3)}ms > 0`);
-        const e = Math.abs(a.scheduledAudioTime - a.expectedAudioTime);
-        schedErr.push(e);
-        if (!(e <= 0.001)) problems.push(`|scheduled-expected|=${ms(e, 3)}ms > 1ms`);
+        if (hasFlag && a.sfxClamped) {
+          nClamped++;
+          clampedErr.push(diff);
+          const lim = outLat + grace + 0.005;
+          if (!(diff >= -1e-9 && diff <= lim)) problems.push(`sfxClamped 但 sched-expected=${ms(diff, 3)}ms 不在 [0, ${ms(lim, 1)}ms]`);
+        } else {
+          const e = Math.abs(diff);
+          schedErr.push(e);
+          if (!(e <= 0.001)) problems.push(`|scheduled-expected|=${ms(e, 3)}ms > 1ms`);
+        }
       }
       if (a.judgment !== quantizeRef.judgmentOf(a.deltaSec)) problems.push(`judgment=${a.judgment} 與 |delta|=${ms(Math.abs(a.deltaSec), 2)}ms 不符(應為 ${quantizeRef.judgmentOf(a.deltaSec)})`);
       if (problems.length) bad.push(`#${a.id}: ${problems.join(', ')}`);
     }
     const st = stats(schedErr);
-    c.check('B2', '音效排程誤差 ≤ 1 ms、late 條件、delta、判定窗口', attacks.length > 0 && bad.length === 0,
-      `非 late ${schedErr.length} 次：|scheduled-expected| 平均 ${ms(st.mean, 4)} / max ${ms(st.max, 4)} ms；late ${nLate} 次${bad.length ? '；' + firstN(bad) : ''}`,
-      { schedErrMaxMs: st.max * 1000, schedErrMeanMs: st.mean * 1000, nLate });
+    const clampShare = nNonLate ? nClamped / nNonLate : 0;
+    c.check('B2', '音效排程誤差（未 clamp ≤ 1 ms；clamped ≤ outputLatency+grace+5ms）、late 條件、delta、判定窗口', attacks.length > 0 && bad.length === 0,
+      `未 clamp ${schedErr.length} 次：|scheduled-expected| 平均 ${ms(st.mean, 4)} / max ${ms(st.max, 4)} ms；clamped ${nClamped}/${nNonLate} 次（${(clampShare * 100).toFixed(1)}%），outputLatency=${ms(outLat, 2)} ms；late ${nLate} 次${bad.length ? '；' + firstN(bad) : ''}`,
+      { schedErrMaxMs: st.max * 1000, schedErrMeanMs: st.mean * 1000, nLate, nClamped, clampedShare: clampShare, outputLatencyMs: outLat * 1000 });
+    if (nMissingFlag) c.add('B2f', 'attack log 含 sfxClamped 欄位', 'WARN', `${nMissingFlag} 筆缺少 sfxClamped，以舊規則（≤1 ms）檢查（缺欄位者一律視為未 clamp）`);
+    if (clampShare > 0.25) c.add('B2c', 'sfxClamped 比例偏高', 'WARN', `非 late 攻擊中 ${(clampShare * 100).toFixed(1)}% 被 clamp（> 25%）`);
   }
 
   // 3. slot 選擇正確性（重跑 §6.1）與佇列

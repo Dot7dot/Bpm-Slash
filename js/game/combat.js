@@ -53,6 +53,7 @@ export class Combat {
 
     const expectedAudioTime = cond.beat0AudioTime + q.slotSongTime;
     const sfxKind = kind;
+    const sfxClamped = expectedAudioTime < g.engine.ensure().currentTime;
     const scheduledAudioTime = g.engine.playAttack(sfxKind, expectedAudioTime);
 
     const prev = this.queue.length ? this.queue[this.queue.length - 1] : null;
@@ -66,7 +67,7 @@ export class Combat {
     const entry = {
       id: attack.id, inputSongTime: input, slotIndex: q.slotIndex, slotSongTime: q.slotSongTime,
       half: q.half, isDownbeat: q.isDownbeat, deltaSec: q.deltaSec, judgment: q.judgment, late: q.late,
-      scheduledAudioTime, expectedAudioTime, impactSongTime: null,
+      sfxClamped, scheduledAudioTime, expectedAudioTime, impactSongTime: null,
     };
     attack.log = entry;
     pushLog('attack', entry);
@@ -75,9 +76,8 @@ export class Combat {
     // Judgment popup above the player's head.
     const label = q.isDownbeat ? '強拍' : q.half === 'front' ? '前拍' : '後拍';
     const early = q.deltaSec < -0.045 ? ' 快' : q.deltaSec > 0.045 ? ' 慢' : '';
-    const slotY = (attack.id % 3) * 16;
-    g.effects.text(g.player.x + ((attack.id % 2) ? 18 : -18), g.player.y - 96 - slotY, JUDGE_TEXT[q.judgment], {
-      color: JUDGE_COLORS[q.judgment], size: q.judgment === 'perfect' ? 26 : 22, life: 0.62, rise: 30,
+    g.effects.text(g.player.x, g.player.y - 96, JUDGE_TEXT[q.judgment], {
+      color: JUDGE_COLORS[q.judgment], size: q.judgment === 'perfect' ? 26 : 22, life: 0.62, rise: 30, channel: 'judge',
       sub: label + early, subColor: q.isDownbeat ? COLORS.down : q.half === 'front' ? COLORS.front : COLORS.back,
     });
     g.hudPulse = 1;
@@ -139,11 +139,11 @@ export class Combat {
     if (a.kind === 'finisher') {
       g.camera.addShake(9, reduce); fx.flashScreen(0.7, '#ffffff', reduce);
       fx.ring(p.x, p.y - 8, move.range, COLORS.down); fx.ring(p.x, p.y - 8, move.range * 0.7, COLORS.front, 0.35);
-      fx.text(p.x, p.y - 130, '小節終結!', { color: COLORS.down, size: 34, life: 1.1, rise: 40 });
+      fx.text(p.x, p.y - 172, '小節終結!', { color: COLORS.down, size: 34, life: 1.1, rise: 40, channel: 'combo' });
     }
     if (a.kind === 'combo8') {
       g.camera.addShake(3, reduce);
-      fx.text(p.x, p.y - 130, '八分連斬!', { color: COLORS.back, size: 30, life: 1.0, rise: 36 });
+      fx.text(p.x, p.y - 172, '八分連斬!', { color: COLORS.back, size: 30, life: 1.0, rise: 36, channel: 'combo' });
     }
 
     let hitAny = false;
