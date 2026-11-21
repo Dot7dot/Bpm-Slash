@@ -14,6 +14,18 @@ export class Menu {
     this._rafId = 0;
     this._bind();
     this.syncInputs();
+    // The AudioContext only exists after the first user gesture: refresh the latency read-out until/while it does.
+    this._latTimer = setInterval(() => this.updateLatencyInfo(), 1000);
+  }
+
+  /** Detected output latency (outputLatency + baseLatency, ms) with the DESIGN-DRUMMER section 6 hint. */
+  updateLatencyInfo() {
+    const el = $('latency-info');
+    if (!el) return;
+    const c = this.app.engine && this.app.engine.ctx;
+    if (!c) { el.textContent = '輸出延遲：尚未偵測（開始試聽或遊戲後顯示）'; return; }
+    const ms = Math.round(((Number(c.outputLatency) || 0) + (Number(c.baseLatency) || 0)) * 1000);
+    el.textContent = `輸出延遲：約 ${ms} ms。鼓聲要精準落在拍上，可比拍點提早約 ${ms} ms 按下；藍牙耳機延遲很大，建議改用有線耳機或喇叭`;
   }
 
   show() { $('menu').classList.remove('hidden'); this.syncInputs(); }
@@ -41,6 +53,7 @@ export class Menu {
     $('chk-reduce').checked = s.reduceFlashing;
     $('music-vol').value = String(s.musicVol);
     $('sfx-vol').value = String(s.sfxVol);
+    this.updateLatencyInfo();
   }
 
   /** 「目前：十六分（每格 170 ms）」 */
@@ -102,8 +115,8 @@ export class Menu {
     $('offset-minus').addEventListener('click', () => setOffset(s().offsetMs - 10));
     $('offset-plus').addEventListener('click', () => setOffset(s().offsetMs + 10));
 
-    $('calib-num').addEventListener('input', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { s().inputCalibrationMs = Math.max(-150, Math.min(150, v)); this._changed(); } });
-    $('grace-num').addEventListener('input', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { s().lateGraceMs = Math.max(0, Math.min(100, v)); this._changed(); } });
+    $('calib-num').addEventListener('input', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { s().inputCalibrationMs = Math.max(-150, Math.min(150, v)); if (s().inputCalibrationMs !== v) e.target.value = String(s().inputCalibrationMs); this._changed(); } });
+    $('grace-num').addEventListener('input', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { s().lateGraceMs = Math.max(0, Math.min(100, v)); if (s().lateGraceMs !== v) e.target.value = String(s().lateGraceMs); this._changed(); } });
     for (const r of document.querySelectorAll('input[name="subdiv"]')) r.addEventListener('change', () => { if (r.checked) { s().subdivision = sanitizeSubdivision(r.value); this._changed(); } });
     $('chk-metronome').addEventListener('change', (e) => { s().metronome = e.target.checked; this._changed(); });
     $('chk-reduce').addEventListener('change', (e) => { s().reduceFlashing = e.target.checked; this._changed(); });

@@ -38,7 +38,7 @@ class Enemy {
    * same tick by the late rule) can still parry. Keyed to song time, never to dt.
    */
   beginStrike(g, ev, onHit) {
-    const grace = Math.min(0.4 * g.conductor.beatDur, Math.max(0, (g.settings && g.settings.lateGraceMs != null ? g.settings.lateGraceMs : 25) / 1000));
+    const grace = Math.min(0.4 * g.conductor.beatDur, Math.max(0, (g.settings && g.settings.lateGraceMs != null ? g.settings.lateGraceMs : 45) / 1000));
     this.pending = { resolveAt: this.strikeTick * g.conductor.beatDur / 8 + grace, ev, onHit };
   }
   /** Called from update(): resolve a pending strike (parry check, else the attack). Returns true when it resolved. */

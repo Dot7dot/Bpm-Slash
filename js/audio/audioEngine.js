@@ -13,6 +13,9 @@ export function makeLimiterCurve(knee = 0.75, n = 4097) {
   return curve;
 }
 
+const METRO_LOOKAHEAD_SEC = 0.2;
+const LATE_CATCHUP_SEC = 0.05;
+
 const DEFAULT_JSON = { title: '預設曲 Neon Pulse', bpm: 88, offsetMs: 0, beatsPerBar: 4, bars: 32 };
 
 export class AudioEngine {
@@ -173,7 +176,9 @@ export class AudioEngine {
   // ---------- Metronome (lookahead scheduler) ----------
 
   /**
-   * Schedule clicks on beat0 + n * beatDur. Lookahead 100 ms, timer 25 ms.
+   * Schedule clicks on beat0 + n * beatDur. Lookahead 200 ms, timer 25 ms. After a main-thread stall,
+   * clicks missed by <= LATE_CATCHUP_SEC are still played at `now` (each beat index is visited exactly once, so
+   * nothing is ever double-scheduled); clicks missed by more are dropped (a click far off the grid is worse than none).
    * @param {Conductor} cond
    * @param {object} o
    * @param {number} o.startBeat first beat index to consider
@@ -193,11 +198,11 @@ export class AudioEngine {
         m.ver = cond.paramsVersion;
         m.next = Math.max(m.min, Math.ceil((now + 0.002 - cond.beat0AudioTime) / cond.beatDur - 1e-9));
       }
-      const horizon = now + 0.1;
+      const horizon = now + METRO_LOOKAHEAD_SEC;
       for (let guard = 0; guard < 64; guard++) {
         const expected = cond.beat0AudioTime + m.next * cond.beatDur;
         if (expected > horizon) break;
-        if (expected >= now - 0.01) {
+        if (expected >= now - LATE_CATCHUP_SEC) {
           if ((m.next < 0 && forceCountIn) || (m.next >= 0 && enabled())) {
             const when = Math.max(expected, now);
             this.lastClickCtxNow = now;

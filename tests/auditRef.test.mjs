@@ -16,7 +16,7 @@ test('audit reference snap equals the game beatSnap (new magnet cap, random inpu
     const s = t + r() * 0.03;
     const minTick = r() < 0.5 ? -Infinity : Math.floor(t / (60 / bpm / 8)) + Math.floor(r() * 6) - 2;
     const strict = r() < 0.15;
-    const lateGraceSec = strict ? 0 : 0.025;
+    const lateGraceSec = strict ? 0 : 0.045;
     const a = beatSnap({ inputSongTime: t, schedNowSongTime: s, bpm, subdivision: sub, lateGraceSec, minTick, strict });
     const b = snapRef({ t, s, bpm, subdivision: sub, lateGraceSec, minTick, strict });
     assert.deepEqual([a.tick, a.rule, a.magnet, a.judgment], [b.tick, b.rule, b.magnet, b.judgment], `i=${i}`);

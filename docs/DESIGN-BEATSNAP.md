@@ -53,7 +53,7 @@
 - `inputSongTime t`（聽覺域，已含輸入延遲校正）
 - `schedNowSongTime s` = `ctx.currentTime − beat0AudioTime`（排程域現在）
 - `bpm`、`subdivision`（`'auto'` 或 1/2/4/8）
-- `lateGraceSec = 0.04`、`minWindupSec = 0.05`、`marginSec = 0.005`、`magnetMaxWaitSec = 0.2`
+- `lateGraceSec = 0.045`、`minWindupSec = 0.05`、`marginSec = 0.005`、`magnetMaxWaitSec = 0.2`
 - `minTick = -Infinity`（佇列用）、`strict = false`（延遲容許 = 0 時為 true）
 
 步驟（`tickDur = beatDur / 8`，`time(k) = k × tickDur`，取整都要加 `1e-9` 容錯）：

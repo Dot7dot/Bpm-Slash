@@ -121,6 +121,7 @@ export class Game {
     if (!this.combat.markParried(attack)) return;
     this.combo.onParry();
     this.fever.onParry();
+    this.effects.text(this.player.x, this.player.y - 130, '+300', { color: '#ffe45e', size: 26, life: 0.9, rise: 20, channel: 'bonus' });
     if (typeof this.engine.playConfirmParry === 'function') this.engine.playConfirmParry();
   }
 

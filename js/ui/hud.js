@@ -126,7 +126,7 @@ function drawDrumScore(ctx, game, cond, vst, b, pulse, cs) {
   const tickDur = bd / 8;
   const phone = cs < 0.7;
   const k = Math.min(1.25, SC);
-  const panelW = phone ? 920 : 680;
+  const panelW = phone ? 920 : cs < 0.85 ? 600 : 680; // landscape phones: leave room for the on-screen drum buttons
   const px0 = (W - panelW) / 2;
   const labelW = 58 * (phone ? 1.15 : 1);
   const headH = 20 * k, laneH = 36 * k;
@@ -240,7 +240,8 @@ export function drawHud(ctx, game, cond, vst, scene, song) {
   const pulse = pulseAt(b.beatPhase, b.beatInBar);
   const cw = ctx.canvas && ctx.canvas.clientWidth;
   const cs = cw ? Math.max(0.2, Math.min(1.5, cw / W)) : 1;
-  SC = Math.min(1.6, Math.max(1, 0.66 / cs));
+  // Smallest label (13 px) should reach >= ~11 CSS px: 13 * SC * cs >= 11  ->  SC >= 0.85 / cs (capped for layout).
+  SC = Math.min(2.2, Math.max(1, 0.85 / cs));
   const s1 = Math.min(1.35, SC);
 
   ctx.save();
@@ -288,7 +289,7 @@ export function drawHud(ctx, game, cond, vst, scene, song) {
       ctx.beginPath(); roundRectPath(ctx, fx, fy, Math.max(6, fw * (fv.active ? 1 : v)), fh, 4); ctx.fill();
       ctx.shadowBlur = 0;
     }
-    text(ctx, 'FEVER', fx, fy + fh + 16 * SC, { size: 13, color: fv.active || fv.armed ? '#ffd24d' : '#b9a7ff', weight: 800 });
+    text(ctx, '狂熱', fx, fy + fh + 16 * SC, { size: 13, color: fv.active || fv.armed ? '#ffd24d' : '#b9a7ff', weight: 800 });
   }
   const bannerY = 136 + (s1 - 1) * 40;
   if (fv.active) {
@@ -346,7 +347,7 @@ export function drawHud(ctx, game, cond, vst, scene, song) {
       let row = '';
       for (let i = 1; i <= 4; i++) row += (i <= n ? '●' : '○') + ' ';
       text(ctx, row.trim(), W / 2, 318, { size: 22, color: '#ffffff', align: 'center' });
-      text(ctx, '你就是鼓手！J／空白鍵＝大鼓「咚」　K＝小鼓「啪」', W / 2, 352, { size: 15, color: '#b9a7ff', align: 'center' });
+      text(ctx, '你就是鼓手！J／空白鍵＝大鼓「咚」　K＝小鼓「啪」', W / 2, 352, { size: 18, color: '#e6dcff', align: 'center' });
     } else if (vst >= 0 && vst < bd * 1.2) {
       const k = vst / (bd * 1.2);
       ctx.globalAlpha = 1 - k * k;

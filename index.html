@@ -32,6 +32,7 @@
   <!-- 主選單 -->
   <main id="menu" class="screen">
     <div class="panel">
+      <div class="menu-scroll">
       <header class="title">
         <h1>BPM <span>SLASH</span></h1>
         <p>拍點斬　你就是鼓手：每一次揮劍，都是這首歌的鼓聲</p>
@@ -90,10 +91,11 @@
           </div>
           <div class="field">
             <label for="grace-num">延遲容許（ms，0 – 100）</label>
-            <input id="grace-num" type="number" min="0" max="100" step="1" value="25">
-            <p class="hint">稍晚按下時仍算命中前一個拍點；0 即嚴格模式</p>
+            <input id="grace-num" type="number" min="0" max="100" step="1" value="45">
+            <p class="hint">稍晚按下時仍算命中前一個拍點（預設 45 ms，與 PERFECT 判定窗一致）；0 即嚴格模式</p>
           </div>
         </div>
+        <p id="latency-info" class="hint latency">輸出延遲：尚未偵測（開始試聽或遊戲後顯示）</p>
         <div class="field">
           <span class="lbl">落點切分</span>
           <div class="row">
@@ -134,7 +136,8 @@
 
       <p class="hint center">← → / A D 移動　J / 空白鍵 = 大鼓「咚」　K = 小鼓「啪」　Esc / P 暫停</p>
 
-      <!-- 底部操作列：捲動時仍固定可見 -->
+      </div>
+      <!-- 底部操作列：固定在捲動區下方（不覆蓋內容） -->
       <footer class="action-bar">
         <button id="btn-preview" class="btn accent" type="button">▶ 試聽對拍</button>
         <span id="preview-dot" class="dot" aria-hidden="true"></span>

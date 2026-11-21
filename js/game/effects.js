@@ -1,5 +1,5 @@
 // Particles, floating texts, slash arcs, rings and screen flash. Uses wall-clock dt.
-import { FONT } from './constants.js';
+import { FONT, W } from './constants.js';
 import { LEVEL_NAMES, LEVEL_COLORS, COMBO_NAMES, stage } from './disco.js';
 
 /** Rounded-rect path with a manual fallback for browsers without CanvasRenderingContext2D.roundRect. */
@@ -241,6 +241,7 @@ export class Effects {
     // texts (normal blending)
     ctx.save();
     ctx.textAlign = 'center';
+    const cam = stage.game && stage.game.camera;
     for (const t of this.texts) {
       const dying = t.frozenK !== undefined;
       const k = dying ? t.frozenK : 1 - t.life / t.max;
@@ -248,11 +249,19 @@ export class Effects {
       ctx.globalAlpha = (k > 0.7 ? 1 - (k - 0.7) / 0.3 : 1) * (dying ? t.life / t.fadeMax : 1);
       const y = t.y - t.rise * (1 - Math.pow(1 - k, 2));
       ctx.font = `800 ${Math.round(t.size * pop)}px ${FONT}`;
+      let tx = t.x;
+      if (t.channel && cam) {
+        // keep channelled popups fully on screen (camera-relative), measured at draw time
+        let w = ctx.measureText(t.str).width;
+        if (t.sub) { const f = ctx.font; ctx.font = `700 ${Math.round(t.size * 0.58 * pop)}px ${FONT}`; w = Math.max(w, ctx.measureText(t.sub).width); ctx.font = f; }
+        const lo = cam.x + w / 2 + 8, hi = cam.x + W - w / 2 - 8;
+        if (lo <= hi) tx = Math.min(hi, Math.max(lo, tx));
+      }
       ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(8,2,28,0.85)'; ctx.lineJoin = 'round';
-      ctx.strokeText(t.str, t.x, y); ctx.fillStyle = t.color; ctx.fillText(t.str, t.x, y);
+      ctx.strokeText(t.str, tx, y); ctx.fillStyle = t.color; ctx.fillText(t.str, tx, y);
       if (t.sub) {
         ctx.font = `700 ${Math.round(t.size * 0.58 * pop)}px ${FONT}`;
-        ctx.strokeText(t.sub, t.x, y + t.size * 0.72); ctx.fillStyle = t.subColor; ctx.fillText(t.sub, t.x, y + t.size * 0.72);
+        ctx.strokeText(t.sub, tx, y + t.size * 0.72); ctx.fillStyle = t.subColor; ctx.fillText(t.sub, tx, y + t.size * 0.72);
       }
     }
     ctx.restore();

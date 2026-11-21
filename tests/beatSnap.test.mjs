@@ -68,9 +68,9 @@ test('rule late: just after a judge-grid point', () => {
   let r = snap(0.27, 120);
   assert.equal(r.rule, 'late'); assert.equal(r.tick, 4); assert.equal(r.late, true);
   assert.equal(r.level, 'eighth'); assert.equal(r.judgment, 'perfect');
-  r = snap(0.25 + 0.04, 120); // boundary inclusive
+  r = snap(0.25 + 0.045, 120); // boundary inclusive (default lateGrace 45 ms)
   assert.equal(r.rule, 'late'); assert.equal(r.tick, 4);
-  r = snap(0.25 + 0.0401, 120);
+  r = snap(0.25 + 0.0451, 120);
   assert.notEqual(r.rule, 'late');
 });
 

@@ -235,8 +235,18 @@ export class Combat {
     this.queue.push(attack);
     if (partner) {
       // Both hits of a unison pair are x1.5; flag the partner (and its log) too.
+      const wasUnison = partner.unison;
       partner.unison = true;
       if (partner.log) partner.log.unison = true;
+      // The partner already connected (e.g. by the late rule) before this press: it dealt its damage without the
+      // unison bonus, so top it up now (x1.5 total) on the enemies it struck that are still alive.
+      if (!wasUnison && partner.state === 'impact' && partner.struck) {
+        for (const s of partner.struck) {
+          if (g.enemies.includes(s.e) && !s.e.dead) g.damageEnemy(s.e, s.base * (UNISON_MULT - 1), 0, partner.kind);
+        }
+        partner.struck = [];
+        if (partner.log) partner.log.unisonTopUp = true;
+      }
     }
     if (unison) {
       g.combo.onUnison();
@@ -308,6 +318,7 @@ export class Combat {
     const radial = RADIAL.has(a.kind);
     const range = move.range + (radial ? 0 : inst.reach);
     const mult = JUDGE_MULTIPLIER[a.q.judgment] * g.fever.multiplier * inst.dmg * (a.unison ? UNISON_MULT : 1);
+    a.struck = []; // enemies this hit damaged, with the damage before the unison bonus (for a late-arriving partner)
     this.hits.push({ id: a.id, tick: a.tick, instrument: a.instrument, level: a.level, judgment: a.judgment, barIndex: Math.floor(a.tick / TICKS_PER_BAR) });
     const keepFrom = Math.floor(a.tick / TICKS_PER_BAR) - 3;
     while (this.hits.length && this.hits[0].barIndex < keepFrom) this.hits.shift();
@@ -326,7 +337,12 @@ export class Combat {
     if (a.kind === 'finisher') {
       g.camera.addShake(9, reduce); fx.flashScreen(0.7, '#ffffff', reduce);
       fx.ring(p.x, p.y - 8, move.range, COLORS.down); fx.ring(p.x, p.y - 8, move.range * 0.7, COLORS.front, 0.35);
-      fx.text(p.x, p.y - 172, '小節終結!', { color: COLORS.down, size: 34, life: 1.1, rise: 40, channel: 'combo' });
+      // Director's ruling: when the bar's beat hits already form rock / four-on-the-floor, the GROOVE banner on the
+      // next downbeat announces it, so the popup text is dropped (shockwave + sound stay).
+      const gr = this.evaluateBar(Math.floor(a.tick / TICKS_PER_BAR));
+      const grooveBar = !!gr && (gr.id === 'rock' || gr.id === 'fourOnFloor');
+      a.log.finisherTextSuppressed = grooveBar;
+      if (!grooveBar) fx.text(p.x, p.y - 172, '小節終結!', { color: COLORS.down, size: 34, life: 1.1, rise: 40, channel: 'combo' });
     }
     if (a.kind === 'fill') {
       g.camera.addShake(7, reduce); fx.flashScreen(0.5, '#ff4fd8', reduce);
@@ -362,6 +378,7 @@ export class Combat {
         continue;
       }
       const dmg = move.dmg * mult;
+      if (!a.unison) a.struck.push({ e, base: dmg });
       g.damageEnemy(e, dmg, move.kb * inst.kb * (radial ? Math.sign(e.x - p.x) || 1 : f), a.kind);
       hitAny = true;
     }

@@ -382,7 +382,7 @@ export function judgmentOf(deltaSec) {
 }
 
 /** §3.2 參考實作。p: { t, s, bpm, subdivision, lateGraceSec, minTick, strict } */
-export function snapRef({ t, s, bpm, subdivision = 'auto', lateGraceSec = 0.025, minTick = -Infinity, strict = false }) {
+export function snapRef({ t, s, bpm, subdivision = 'auto', lateGraceSec = 0.045, minTick = -Infinity, strict = false }) {
   const tickDur = 60 / bpm / 8;
   const time = (k) => (k * 60 / bpm) / 8;
   const S = stepRef(subdivision, bpm);
@@ -472,7 +472,7 @@ export function analyzeRun(data, cfg) {
   const bpm = cfg.bpm;
   const beatDur = 60 / bpm;
   const tickDur = beatDur / 8;
-  const grace = (cfg.lateGraceMs ?? 25) / 1000;
+  const grace = (cfg.lateGraceMs ?? 45) / 1000;
   const subdivision = cfg.subdivision ?? 'auto';
   const expectStep = stepRef(subdivision, bpm);
   const expectJudge = Math.max(4, expectStep);
@@ -912,7 +912,7 @@ async function runConfig(browser, baseUrl, cfg, opts) {
 
     await call('setInvincible', true);
     await call('clearLogs');
-    await withTimeout(call('start', { bpm: cfg.bpm, subdivision: cfg.subdivision ?? 'auto', lateGraceMs: cfg.lateGraceMs ?? 25 }), 30000, 'start()');
+    await withTimeout(call('start', { bpm: cfg.bpm, subdivision: cfg.subdivision ?? 'auto', lateGraceMs: cfg.lateGraceMs ?? 45 }), 30000, 'start()');
     const beatDur = 60 / cfg.bpm;
 
     // 等待進入 playing
@@ -1222,7 +1222,7 @@ async function runBrowserPart(opts, baseUrl) {
     for (const cfg of matrix.filter((c) => !opts.only || opts.only.includes(c.bpm))) {
       // 慢速曲（40 BPM）縮減小節數，但至少 2 小節；窗口上限約 24 秒
       const bars = Math.max(2, Math.min(opts.bars, Math.floor(24 / (4 * 60 / cfg.bpm))));
-      const lg = cfg.lateGraceMs ?? 25;
+      const lg = cfg.lateGraceMs ?? 45;
       const full = { subdivision: 'auto', ...cfg, lateGraceMs: lg };
       full.expectStep = stepRef(full.subdivision, full.bpm);
       console.error(`… 執行 bpm=${full.bpm} subdivision=${full.subdivision}（stepTicks ${full.expectStep}）lateGraceMs=${lg}（${bars} 小節，約 ${Math.round(bars * 4 * 60 / cfg.bpm + 4 * 60 / cfg.bpm + 4)} 秒）`);
