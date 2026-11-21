@@ -857,6 +857,34 @@ function pressSequenceInPage({ startGrid, offsetsTicks, jitterMs, instruments })
   })();
 }
 
+/**
+ * 在頁面內獵取招架：找到下一個有 strikeTick 的敵人，把玩家放到「劍打不到但招架距離內」的位置，
+ * 並在出招拍後 4 ms 用任一支鼓按下（由 late 規則吸附到同一個 tick）。回傳嘗試次數。
+ */
+async function parryHuntInPage({ maxMs, instruments }) {
+  const h = window.__BPM_SLASH_DEBUG__;
+  const get = () => (typeof h.getGame === 'function' ? h.getGame() : null);
+  if (!get()) return 0;
+  const tickDur = 60 / h.getState().bpm / 8;
+  const t0 = performance.now(); const tried = new Set();
+  while (performance.now() - t0 < maxMs) {
+    const g = get(); if (!g || g.over) break;
+    const st = h.getState();
+    for (const e of g.enemies) {
+      if (e.strikeTick == null || tried.has(`${e.id}:${e.strikeTick}`)) continue;
+      const target = e.strikeTick * tickDur;
+      if (target - st.songTime < 0.5 && target - st.songTime > 0.06) {
+        tried.add(`${e.id}:${e.strikeTick}`);
+        g.player.x = e.x - (e.type === 'bat' ? 128 : 95); g.player.facing = 1;
+        await new Promise((res) => { const f = () => (h.getState().songTime >= target + 0.004 || performance.now() - t0 > maxMs + 1500 ? res() : setTimeout(f, 1)); f(); });
+        h.pressAttack(instruments[tried.size % instruments.length]);
+      }
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return tried.size;
+}
+
 async function runConfig(browser, baseUrl, cfg, opts) {
   const result = { config: cfg, checks: [], data: null, fatal: null };
   const errors = [];
@@ -927,7 +955,10 @@ async function runConfig(browser, baseUrl, cfg, opts) {
       const r = rnd();
       const pick = iter < script.length ? script[iter] : null;
       iter++;
-      if (pick === 'rock' || (!pick && r < 0.12)) { await seq(32, [0, 8, 16, 24], 12, 'rock-beat', [K, SN, K, SN]); }
+      if (!pick && cfg.lateGraceMs !== 0 && rnd() < 0.3) {
+        const n = await withTimeout(page.evaluate(parryHuntInPage, { maxMs: 3000, instruments: [K, SN] }), 15000, 'parry-hunt');
+        pressCount += n; note('parry-hunt', n);
+      } else if (pick === 'rock' || (!pick && r < 0.12)) { await seq(32, [0, 8, 16, 24], 12, 'rock-beat', [K, SN, K, SN]); }
       else if (pick === 'floor' || (!pick && r < 0.22)) { await seq(32, [0, 8, 16, 24], 12, 'four-on-floor', [K, K, K, K]); }
       else if (pick === 'unison' || (!pick && r < 0.32)) { await seq(8, [0, 0, 8, 8, 16, 16], 6, 'unison', [K, SN, SN, K, K, SN]); }
       else if (pick === 'backbeat' || (!pick && r < 0.38)) { await seq(32, [8, 24], 12, 'backbeat', [SN, SN]); }
