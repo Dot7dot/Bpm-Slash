@@ -6,7 +6,7 @@
 
 - 純 HTML5 Canvas 2D + Web Audio API，原生 ES Modules
 - 零外部相依、無建置步驟
-- 預設附一首原創 88 BPM 去鼓伴奏「霓虹步伐 Neon Step」，也可以上傳自己的 WAV / MP4（建議使用去鼓版伴奏）
+- 附三首原創去鼓伴奏（霓虹步伐 88 BPM、午夜放克 100 BPM、星光跑者 112 BPM），選單可直接挑選；也可以上傳自己的 WAV / MP4（建議使用去鼓版伴奏）
 
 設計規格依序見 [`docs/DESIGN.md`](docs/DESIGN.md)（總規格）→ [`docs/DESIGN-BEATSNAP.md`](docs/DESIGN-BEATSNAP.md)（v2，BeatSnap 與戰鬥）→ [`docs/DESIGN-DRUMMER.md`](docs/DESIGN-DRUMMER.md)（v3，玩家就是鼓手；與前兩份衝突時以後者為準）。
 
@@ -27,7 +27,7 @@ npm start
 | `npm start` | 啟動零相依靜態伺服器（預設 port 5173） |
 | `npm test` | 以 Node 內建 test runner 執行 `tests/*.test.mjs` 單元測試 |
 | `npm run audit:rhythm` | 以 headless Chromium 自動稽核對拍（需要 Playwright，見下方） |
-| `npm run generate:song` | 重新合成預設曲：寫出去鼓版 `assets/audio/default-88bpm.wav` 與 `.json` |
+| `npm run generate:song` | 重新合成內建曲：寫出三首去鼓版 WAV 與 `.json` |
 
 `npm run audit:rhythm` 需要 Playwright。在新的電腦上請先安裝：
 
@@ -152,7 +152,7 @@ BeatSnap 的目標是：**你按下攻擊後，鼓聲一定落在音樂的格線
 
 ## 歌曲段落驅動世界
 
-歌曲會依能量分成「低、中、高」強度的段落（預設曲另有人工標註的 intro、verse、chorus、breakdown、final）。段落強度會影響：
+歌曲會依能量分成「低、中、高」強度的段落（內建曲另有人工標註的 intro、verse、chorus、breakdown、final）。段落強度會影響：
 
 - **低**：生怪少、蝙蝠每 2 小節俯衝一次、燈光較暗。
 - **中**：一般。
@@ -160,24 +160,35 @@ BeatSnap 的目標是：**你按下攻擊後，鼓聲一定落在音樂的格線
 
 敵人的每一次動作（跳、預警、出招、暈眩）都只在節拍事件上觸發，地形與舞池燈光也都跟著拍子跳動。
 
-## 上傳歌曲與 BPM 設定
+## 選歌、上傳與 BPM 設定
 
-1. 在選單按「上傳去鼓伴奏 WAV / MP4」選擇檔案。WAV 最穩定；MP4 需要瀏覽器能解碼其音軌（AAC 或 Opus 通常可行），解碼失敗時會提示改用 WAV 或 AAC 編碼的 MP4。上傳的檔案**不會被保存**，重新整理後需要再上傳。
-2. 設定 **BPM**（40 – 240，可到小數點第一位）。可以直接輸入、拖曳滑桿、用 **Tap Tempo**（跟著歌曲連續點擊，取最近 8 次間隔的平均，超過 2 秒沒點就重置），或按 **自動偵測** 取得建議值後再按「套用」。自動偵測的可信度只是參考，請務必用耳朵確認。
+選單的「歌曲」區有三張內建曲卡片（標題、BPM、長度）。點一張就會載入並套用該曲的 BPM 與第一拍偏移，也會套用它的段落強度；選擇會被記住（`settings.songId`）。結算畫面的「再玩一次」會重玩同一首。
+
+1. 想用自己的歌：在選單按「上傳去鼓伴奏 WAV / MP4」選擇檔案（上傳後不會有任何內建曲卡片被標示）。WAV 最穩定；MP4 需要瀏覽器能解碼其音軌（AAC 或 Opus 通常可行），解碼失敗時會提示改用 WAV 或 AAC 編碼的 MP4。上傳的檔案**不會被保存**，重新整理後需要再上傳。
+2. 設定 **BPM**（40 – 240，**只能是整數**；輸入小數會四捨五入，例如 88.7 → 89）。可以直接輸入、拖曳滑桿，或按 **自動偵測** 取得（整數）建議值後再按「套用」。自動偵測的可信度只是參考，請務必用耳朵確認。
 3. 設定 **第一拍偏移**（ms）：歌曲檔案中第 1 拍所在的位置，可用 ±10 ms 按鈕微調。
-4. 按 **試聽對拍**：從頭播放歌曲並疊加節拍器，調整 BPM 或偏移會即時生效，用耳朵確認是否對齊。
+4. 按 **試聽對拍**：從頭播放歌曲並疊加節拍器 click（遊戲中**沒有**背景節拍器，click 只存在於試聽，是用來對齊的工具），調整 BPM 或偏移會即時生效，用耳朵確認是否對齊。
 5. 若覺得判定總是偏早或偏晚，用 **輸入延遲校正**。
 
 **建議上傳去鼓伴奏（minus-drum / drumless backing track）**。這樣你打出的鼓才是唯一的鼓，體驗最好。含鼓的歌曲也能玩，但原曲的鼓會和你的鼓互相打架。
 
-其他設定：落點切分（自動／四分／八分／十六分／三十二分）、延遲容許（0–100 ms，預設 45；0 為嚴格模式）、節拍器開關、音樂 / 音效音量、減少閃爍（關閉螢幕閃光與震屏）。設定會存在瀏覽器的 `localStorage`，讀寫失敗時仍可遊玩，只是不會記住設定。已保存的舊設定（例如延遲容許 40 ms）會沿用使用者的值。
+其他設定：落點切分（自動／四分／八分／十六分／三十二分）、延遲容許（0–100 ms，預設 45；0 為嚴格模式）、音樂 / 音效音量、減少閃爍（關閉螢幕閃光與震屏）。設定會存在瀏覽器的 `localStorage`，讀寫失敗時仍可遊玩，只是不會記住設定。已保存的舊設定（例如延遲容許 40 ms）會沿用使用者的值。
 
-## 預設曲
+## 內建曲（三首原創去鼓伴奏）
 
-- 歌名：**霓虹步伐 Neon Step（去鼓伴奏版）**（原創）
-- BPM：**88**，共 **32 小節**，約 87.3 秒
-- 去鼓：只有 bass、pad、lead 與一段上升噪音掃掠，沒有任何打擊樂
-- 由 `tools/generate-default-song.mjs` 以程式合成（`npm run generate:song` 可重新產生），產物為 `assets/audio/default-88bpm.wav` 與 `assets/audio/default-88bpm.json`
+| id | 歌名 | BPM | 風格 | 檔案 |
+|---|---|---|---|---|
+| `neon-step`（預設） | 霓虹步伐 Neon Step | 88 | A 小調合成器 | `assets/audio/default-88bpm.wav/.json` |
+| `midnight-funk` | 午夜放克 Midnight Funk | 100 | E 多利安放克 | `assets/audio/song-100bpm.wav/.json` |
+| `starlight-runner` | 星光跑者 Starlight Runner | 112 | D 大調合成器流行 | `assets/audio/song-112bpm.wav/.json` |
+
+- 清單在 `assets/audio/songs.json`（`[{ id, title, bpm, json, wav }]`）；載入失敗時選單會改用內建的同內容清單。
+- 每首都是 32 小節、去鼓（只有 bass、pad、lead 等，沒有任何打擊樂），第一拍在檔案開頭。
+- 由 `tools/generate-default-song.mjs` 與 `tools/generate-extra-songs.mjs` 以程式合成（`npm run generate:song`）。
+
+## 除錯掛鉤
+
+`window.__BPM_SLASH_DEBUG__`（供稽核與測試）：`start({ songId, bpm, offsetMs, subdivision, lateGraceMs })` 的 `songId` 會先選擇並載入內建曲（套用其 BPM 與偏移）再開始；明確傳入的 `bpm` 可以是小數（僅供稽核，玩家可見的設定一律是整數）。`getState()` 含 `songId`。遊戲中沒有節拍器，`getMetronomeLog()` 應永遠為空；`startPreview()` / `stopPreview()` 啟停試聽對拍，其 click 記錄在 `getPreviewLog()`。
 
 ## 遊戲內容
 
@@ -228,14 +239,14 @@ BeatSnap 的目標是：**你按下攻擊後，鼓聲一定落在音樂的格線
 - **B4 impact 延遲**：命中畫面的時間落在 connect 之後 0 ~ 40 ms（headless 容許）。
 - **B5 拍點事件**：beat event 連續不漏拍、拍與小節索引正確、延遲 ≤ 40 ms。
 - **B6 世界事件**：只在規定拍位觸發（spawn、spike、bat、guard 等）；groove 與 fever 只在 beatInBar 0；fever-start／fever-end 成對、相隔 8 拍；parry 在出招拍；enemy-stun 可在任意拍；groove 以獨立實作重算逐小節比對。
-- **B7 節拍器**：排程誤差 ≤ 1 ms 且連續。
+- **B7 無節拍器**：遊戲中（含預備拍）metronome log 必須為空。**B7p**：試聽對拍的 click 排程誤差 ≤ 1 ms 且連續。
 - **B8 錯誤**：無 console error 與 page error。
-- **B9 離線渲染**：以 OfflineAudioContext 渲染鼓組的每個 `HIT_INSTRUMENTS × HIT_LEVELS × {onBeat, off}`，以及齊奏、過門、連段、招架、狂熱與節拍器 click，真實發聲與排程時間差 ≤ 2 ms。
+- **B9 離線渲染**：以 OfflineAudioContext 渲染鼓組的每個 `HIT_INSTRUMENTS × HIT_LEVELS × {onBeat, off}`，以及齊奏、過門、連段、招架、狂熱與試聽用的節拍器 click，真實發聲與排程時間差 ≤ 2 ms。
 - **B10 響度與起音**：每支鼓的響度順序為 bar > half ≥ beat > eighth > sixteenth > thirtysecond，每個 level 的 onBeat > off；反應音（招架確認、受擊）為柔和起音，不產生離格瞬態。
 
 ## 時間模型
 
-唯一的主時鐘是 `AudioContext.currentTime`。畫面用 `getOutputTimestamp()` 換算成聽覺時間，鍵盤事件用 `event.timeStamp` 換算。節拍事件、敵人動作、尖刺、生怪與招架判定都只在歌曲時間的節拍上觸發；不使用 `setTimeout` / `Date.now()` / 累加 `dt` 推算節拍。節拍器的 lookahead 排程器只用計時器來「喚醒」，排程時間一律由音訊時鐘計算。詳見 `docs/DESIGN.md` §5。
+唯一的主時鐘是 `AudioContext.currentTime`。畫面用 `getOutputTimestamp()` 換算成聽覺時間，鍵盤事件用 `event.timeStamp` 換算。節拍事件、敵人動作、尖刺、生怪與招架判定都只在歌曲時間的節拍上觸發；不使用 `setTimeout` / `Date.now()` / 累加 `dt` 推算節拍。試聽用節拍器的 lookahead 排程器只用計時器來「喚醒」，排程時間一律由音訊時鐘計算。詳見 `docs/DESIGN.md` §5。
 
 ## 專案結構
 
@@ -244,7 +255,7 @@ index.html                  頁面骨架：選單（含玩法說明）、暫停�
 css/style.css               霓虹風格樣式
 docs/                       設計規格（DESIGN.md → DESIGN-BEATSNAP.md → DESIGN-DRUMMER.md）
 package.json                npm 指令
-assets/audio/               預設去鼓曲（wav 與 json）
+assets/audio/               三首內建去鼓曲（wav 與 json）與 songs.json 清單
 js/main.js                  啟動、場景狀態機、主迴圈、輸入、畫面尺寸
 js/core/                    純函式（不碰 DOM / Web Audio，可在 Node 測試）
   beatMath.js               拍 / 小節 / tick 換算、脈動包絡
@@ -253,11 +264,10 @@ js/core/                    純函式（不碰 DOM / Web Audio，可在 Node 測
   comboTracker.js           連段偵測、連擊鏈、分數、評級、狂熱量表
   groove.js                 鼓手節奏型（搖滾／四拍大鼓／反拍）判定
   songMap.js                歌曲能量地圖與段落強度
-  tapTempo.js               Tap Tempo
   bpmDetect.js              自動 BPM 偵測
   rng.js                    種子亂數
 js/audio/
-  audioEngine.js            AudioContext、解碼、播放、音效入口、節拍器排程
+  audioEngine.js            AudioContext、解碼、播放、音效入口、試聽用節拍器排程
   conductor.js              主時鐘、歌曲時間、拍點事件
   sfxVoices.js              鼓組音色（大鼓、小鼓）、連段與招架音色
 js/game/

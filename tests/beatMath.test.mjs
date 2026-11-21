@@ -8,6 +8,14 @@ test('beatDur / halfStep', () => {
   assert.ok(Math.abs(bm.halfStep(88) - 30 / 88) < 1e-12);
 });
 
+test('roundBpm', () => {
+  assert.equal(bm.roundBpm(88.7), 89);
+  assert.equal(bm.roundBpm(88.4), 88);
+  assert.equal(bm.roundBpm(10), 40);
+  assert.equal(bm.roundBpm(999), 240);
+  assert.equal(bm.roundBpm(NaN), 88);
+});
+
 test('clampBpm', () => {
   assert.equal(bm.clampBpm(10), 40);
   assert.equal(bm.clampBpm(999), 240);
