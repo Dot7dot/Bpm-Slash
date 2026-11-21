@@ -368,8 +368,6 @@ function analyzeWav(opts) {
     report.denseOnsets = { count: dense.length, meanAbsMs: ds.mean * 1000, p95Ms: ds.p95 * 1000 };
     c.add('A2d', '較敏感偵測（rise ≥ 4 dB）的參考統計', 'INFO', `onset=${dense.length}，平均 |誤差|=${ms(ds.mean)} ms，p95=${ms(ds.p95)} ms（含較多其他聲部與瞬態，僅供參考）`);
   }
-  const tempo = estimateTempo(flux, hopSec);
-  report.tempo = tempo;
   // A3：遊戲自己的 detectBpm（選單「自動偵測」用的同一個模組）必須回報歌曲的 BPM（±0.5）。
   // 剛好差一個八度（×2 或 ÷2）→ WARN；其他一律 FAIL。
   let det = null;
