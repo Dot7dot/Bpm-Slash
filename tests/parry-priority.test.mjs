@@ -90,5 +90,6 @@ test('one attack parries several enemies', () => {
   e2.armStrike({ beatIndex: 1 }, s.g); s.g.enemies.push(e2);
   press(s, 1000, 'kick');
   s.g.combat.update(1.0);
-  assert.deepEqual(s.parries.sort(), [1, 2]);
+  assert.equal(s.e.stunned && e2.stunned, true); // both stunned; score/fever count once per attack (Game.onParry idempotent)
+  assert.equal(s.parries.length, 1);
 });
