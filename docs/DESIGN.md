@@ -60,7 +60,7 @@
 | `js/core/beatMath.js` | Sonnet-Core | 純函式：拍／小節換算、半拍 slot 時間 |
 | `js/core/quantizer.js` | Sonnet-Core | 純函式：攻擊量化與判定（§6） |
 | `js/core/comboTracker.js` | Sonnet-Core | 純函式：連段偵測 |
-| `js/core/tapTempo.js` | Sonnet-Core | 純函式：Tap Tempo |
+| ~~`js/core/tapTempo.js`~~ | Sonnet-Core | （v4 已移除 Tap Tempo，見 DESIGN-DRUMMER §6b） |
 | `js/core/bpmDetect.js` | Haiku-BPM | 純函式：自動 BPM 偵測（§9.3） |
 | `js/audio/conductor.js` | Sonnet-Core | 主時鐘、歌曲時間、拍點事件 |
 | `js/audio/audioEngine.js` | Sonnet-Core | AudioContext、載入/解碼、播放、音效合成、節拍器排程 |
@@ -119,7 +119,7 @@
 - 浮點運算時一律由整數 index 乘上步長得到時間，**不得以累加方式**推進，避免漂移。
 
 ### 5.4 預備拍（Count-in）
-開始遊戲時：`beat0AudioTime = ctx.currentTime + 0.15 + 4 * beatDur`。也就是先有一小節（beat −4 ~ −1）的預備拍，HUD 顯示「1 2 3 4」後「GO!」，節拍器在預備拍一定會響（即使節拍器設定關閉）。
+開始遊戲時：`beat0AudioTime = ctx.currentTime + 0.15 + 4 * beatDur`。也就是先有一小節（beat −4 ~ −1）的預備拍，HUD 顯示「1 2 3 4」後「GO!」。（**v4 更新**：遊戲中含預備拍都不再播放節拍器，只保留畫面倒數；見 DESIGN-DRUMMER §6b。）
 
 ### 5.5 拍點事件
 每一幀用 `visualSongTime` 算出 `beatIndex`，若與上一幀不同，對**每一個跨越的整數拍**依序發出 beat event（不可漏拍、不可重複），內容：`{ beatIndex, beatInBar, barIndex, isDownbeat, beatSongTime }`。半拍事件同理（供後拍相關動畫使用）。
@@ -218,12 +218,12 @@
 ### 9.1 主選單／設定
 - 歌曲來源：預設曲（88 BPM）或上傳檔案。`<input type="file" accept=".wav,.mp4,.m4a,audio/wav,audio/x-wav,audio/mp4,video/mp4">`。
 - 解碼：`ctx.decodeAudioData(arrayBuffer)`；失敗時顯示「無法解碼此檔案，請改用 WAV 或 AAC 編碼的 MP4」。（註：可行性審查實測，本環境的 Playwright Chromium 157 可解碼 AAC、Opus、FLAC 音軌的 MP4；較舊或開源版 Chromium 可能缺少 AAC，屆時改用 Opus／FLAC 測試。）
-- BPM：數字欄 + 滑桿（40–240，step 0.1，預設 88）；**Tap Tempo** 按鈕（平均最近 8 次間隔，超過 2 秒沒按就重置）；**自動偵測**按鈕（呼叫 `detectBpm`，顯示建議值，玩家按「套用」才生效）。
+- BPM：數字欄 + 滑桿（40–240，預設 88）；**自動偵測**按鈕（呼叫 `detectBpm`，顯示建議值，玩家按「套用」才生效）。（**v4 更新**：BPM 只允許整數、step 1；Tap Tempo 已移除；新增三首內建曲的曲目選擇。見 DESIGN-DRUMMER §6b。）
 - 第一拍偏移（ms，0–10000，附 ±10 ms 微調鈕）。
 - 輸入延遲校正（ms，−150 ~ +150）。
 - 延遲容許（ms，0–100，預設 40；0 = 嚴格模式）。
 - 量化模式：八分（前拍＋後拍）／四分（僅前拍）。
-- 節拍器開關、音樂音量、音效音量、減少閃爍。
+- 音樂音量、音效音量、減少閃爍。（**v4 更新**：節拍器開關已移除；遊戲中沒有節拍器，只有「試聽對拍」會播放 click。）
 - **試聽對拍**：從頭播放歌曲並疊加節拍器，BPM／偏移改動要即時套用，讓玩家用耳朵確認上傳的歌與 BPM 是否對齊。
 - 開始遊戲。
 - 設定以 `localStorage` 保存（全部包在 try/catch，讀不到也要能正常運作；上傳的檔案不保存）。
@@ -269,7 +269,7 @@
 3. impact frame：`0 ≤ impactSongTime − slotSongTime ≤ 1 幀`（60 fps 下 ≤ 20 ms；headless 環境容許 ≤ 40 ms，另因 headless 偶發 2–3 幀卡頓，最多 15% 的攻擊落在 40–60 ms 只列為警告，超過 60 ms 一律失敗）。此項只影響畫面，攻擊音效走音訊時鐘，不受幀率影響。
 4. beat event 不漏拍、不重複，觸發延遲 ≤ 1 幀；強拍每 4 拍一次。
 5. 世界事件只在規格指定的拍點觸發（例如 `spike-up` 只會在 `beatInBar 3`、`spawn` 只會在 `beatInBar 0`）。
-6. 節拍器：`|scheduledAudioTime − expectedAudioTime| ≤ 1 ms`。
+6. 節拍器：`|scheduledAudioTime − expectedAudioTime| ≤ 1 ms`。（**v4 更新**：只適用於「試聽對拍」的 click；遊戲中的 metronome log 必須為空。）
 7. 預設曲：鼓的 onset 與 88 BPM 網格平均誤差 ≤ 5 ms；偵測 BPM = 88 ± 0.5。
 8. 更改 BPM（例如 40、72.5、120、150、240）與嚴格模式後以上條件仍成立；嚴格模式下 `sfxClamped` 必須永遠為 `false`。
 8b. **實際發聲驗證**：以 OfflineAudioContext 渲染各種攻擊音效與節拍器 click，量測的真實 onset 與排定時間差 ≤ 2 ms（避免音色的起音包絡造成聽感延遲）。log 另記錄排程當下的 `ctxNowAtSchedule`，非 clamped 的項目必須滿足 `scheduledAudioTime − ctxNowAtSchedule ≥ 0`。
