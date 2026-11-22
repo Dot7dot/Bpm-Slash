@@ -195,8 +195,19 @@ class App {
   // ---------- preview ----------
   async togglePreview() {
     if (this.previewing) { this.stopPreview(); return; }
-    if (!this.song) { this.menu.message('尚未載入歌曲', true); return; }
-    await this.engine.resume();
+    if (this._previewStarting) return; // double press while starting
+    this._previewStarting = true;
+    try {
+      // A newly selected song may still be loading: wait so buffer, BPM and offset all belong to the same song.
+      while (this._songLoading) { const p = this._songLoading; try { await p; } catch (e) { /* surfaced elsewhere */ } if (this._songLoading === p) break; }
+      if (!this.song) { this.menu.message('尚未載入歌曲', true); return; }
+      await this.engine.resume();
+      if (this.previewing) return;
+      this._startPreviewNow();
+    } finally { this._previewStarting = false; }
+  }
+
+  _startPreviewNow() {
     const ctx = this.engine.ctx;
     this.applyParams();
     this.conductor.songStartAudioTime = ctx.currentTime + 0.12;

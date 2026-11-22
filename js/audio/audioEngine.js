@@ -219,7 +219,10 @@ export class AudioEngine {
   startMetronome(cond, { startBeat = -4, enabled = () => true, forceCountIn = true, onClick } = {}) {
     this.stopMetronome();
     const ctx = this.ensure();
-    const m = { next: startBeat, min: startBeat, ver: cond.paramsVersion, timer: 0 };
+    // Per-preview gain: stopMetronome() zeroes + disconnects it, silencing clicks already scheduled inside the lookahead.
+    const bus = ctx.createGain();
+    bus.connect(this.clickGain);
+    const m = { next: startBeat, min: startBeat, ver: cond.paramsVersion, timer: 0, bus };
     const tick = () => {
       if (ctx.state !== 'running') return;
       const now = ctx.currentTime;
@@ -236,7 +239,7 @@ export class AudioEngine {
           if ((m.next < 0 && forceCountIn) || (m.next >= 0 && enabled())) {
             const when = Math.max(expected, now);
             this.lastClickCtxNow = now;
-            this.playClick(when, mod(m.next, 4) === 0);
+            this.playClick(when, mod(m.next, 4) === 0, m.bus);
             if (onClick) onClick(m.next, when, expected, now);
           }
         }
@@ -249,7 +252,12 @@ export class AudioEngine {
   }
 
   stopMetronome() {
-    if (this._metro) { clearInterval(this._metro.timer); this._metro = null; }
+    const m = this._metro;
+    if (!m) return;
+    clearInterval(m.timer);
+    this._metro = null;
+    try { m.bus.gain.cancelScheduledValues(0); m.bus.gain.value = 0; } catch (e) { /* ignore */ }
+    try { m.bus.disconnect(); } catch (e) { /* ignore */ }
   }
 
   // ---------- SFX synthesis ----------
@@ -257,7 +265,7 @@ export class AudioEngine {
   _tone(when, o) { this.voices.tone(when, o); }
   _noise(when, o) { this.voices.noise(when, o); }
 
-  playClick(when, accent) { this.voices.click(when, accent); }
+  playClick(when, accent, out) { this.voices.click(when, accent, out); }
 
   /**
    * v3 hit SFX (drum kit; desc.instrument 'kick'|'snare') scheduled on the audio clock.
