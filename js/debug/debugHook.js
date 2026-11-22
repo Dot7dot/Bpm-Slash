@@ -3,7 +3,8 @@ import { stepTicksFor, judgeStepFor } from '../core/beatSnap.js';
 
 const MAX_LOG = 5000;
 
-const logs = { attack: [], beat: [], world: [], metronome: [] };
+// metronome = gameplay clicks (must stay empty since v4); preview = clicks of the 試聽對拍 alignment tool.
+const logs = { attack: [], beat: [], world: [], metronome: [], preview: [] };
 
 let appRef = null;
 
@@ -11,7 +12,7 @@ let appRef = null;
 export function pushLog(name, entry) {
   // Metronome entries are pushed synchronously from the engine's onClick right after the click was
   // scheduled; attach the ctx.currentTime the engine read for that click if the caller did not.
-  if (name === 'metronome' && entry.ctxNowAtSchedule === undefined && appRef && appRef.engine) {
+  if ((name === 'metronome' || name === 'preview') && entry.ctxNowAtSchedule === undefined && appRef && appRef.engine) {
     entry.ctxNowAtSchedule = appRef.engine.lastClickCtxNow;
   }
   const arr = logs[name];
@@ -28,7 +29,7 @@ const copy = (arr) => arr.map((e) => ({ ...e }));
 export function installDebugHook(app) {
   appRef = app;
   const hook = {
-    version: 3,
+    version: 4,
     getState() {
       const c = app.conductor;
       const hasCtx = !!app.engine.ctx;
@@ -50,14 +51,21 @@ export function installDebugHook(app) {
         audioNow: hasCtx ? c.audioNow() : 0,
         outputLatency: app.engine.outputLatency,
         songName: app.song ? app.song.name : '',
+        songId: app.song && app.song.id ? app.song.id : null,
+        previewing: !!app.previewing,
         songDuration: dur,
       };
     },
+    /** opts: { songId?, bpm?, offsetMs?, subdivision?, lateGraceMs? }. songId selects a built-in song (waits for it to load);
+     *  an explicit bpm (debug only) may keep decimals for audits - the player-facing UI is integer-only. */
     async start(opts = {}) {
       clearLogs();
       await app.startGame({ ...opts, fromDebug: true });
     },
     stop() { app.stopToMenu(); },
+    /** Start / stop the 試聽對拍 preview (song + metronome clicks). Clicks are logged in getPreviewLog(). */
+    async startPreview() { await app.songReady; if (app._songLoading) await app._songLoading; if (!app.previewing) await app.togglePreview(); return app.previewing; },
+    stopPreview() { app.stopPreview(); },
     /** instrument: 'kick' (default) | 'snare'. Attack log entries carry `instrument` and `unison`. */
     pressAttack(instrument = 'kick') { return app.pressAttack(performance.now(), instrument === 'snare' ? 'snare' : 'kick'); },
     /** The live Game (or null) so tests can inspect combat.barHits / combat.queued / combo etc. */
@@ -67,6 +75,7 @@ export function installDebugHook(app) {
     getBeatLog() { return copy(logs.beat); },
     getWorldLog() { return copy(logs.world); },
     getMetronomeLog() { return copy(logs.metronome); },
+    getPreviewLog() { return copy(logs.preview); },
     clearLogs,
   };
   window.__BPM_SLASH_DEBUG__ = hook;

@@ -40,15 +40,15 @@
 
       <section class="card">
         <h2>歌曲</h2>
+        <div id="song-list" class="song-list" role="radiogroup" aria-label="內建歌曲"></div>
         <div class="row">
-          <button id="btn-default-song" class="btn" type="button">使用預設曲（88 BPM）</button>
           <label class="btn file">
             上傳去鼓伴奏 WAV / MP4
             <input id="file-input" type="file" accept=".wav,.mp4,.m4a,audio/wav,audio/x-wav,audio/mp4,video/mp4">
           </label>
         </div>
         <p id="song-status" class="status">載入中…</p>
-        <p class="hint">預設曲為去鼓伴奏。上傳自己的歌時，建議使用去鼓版（minus-drum / drumless backing track）。</p>
+        <p class="hint">三首內建曲都是去鼓伴奏，選擇後會自動套用該曲的 BPM 與第一拍偏移。上傳自己的歌時，建議使用去鼓版（minus-drum / drumless backing track）。</p>
         <p id="song-msg" class="msg" role="status"></p>
       </section>
 
@@ -57,13 +57,9 @@
         <div class="field">
           <label for="bpm-num">BPM（40 – 240）</label>
           <div class="row nowrap">
-            <input id="bpm-num" type="number" min="40" max="240" step="0.1" value="88">
-            <input id="bpm-range" type="range" min="40" max="240" step="0.1" value="88">
+            <input id="bpm-num" type="number" min="40" max="240" step="1" value="88">
+            <input id="bpm-range" type="range" min="40" max="240" step="1" value="88">
           </div>
-        </div>
-        <div class="row">
-          <button id="btn-tap" class="btn" type="button">Tap Tempo</button>
-          <span id="tap-info" class="hint">跟著歌曲拍點連續點擊（至少 2 次）</span>
         </div>
         <div class="row">
           <button id="btn-detect" class="btn" type="button">自動偵測</button>
@@ -78,7 +74,7 @@
             <button id="offset-plus" class="btn small" type="button">+10</button>
           </div>
         </div>
-        <p id="preview-state" class="hint">從頭播放歌曲並疊加節拍器；調整 BPM 或偏移會即時生效</p>
+        <p id="preview-state" class="hint">從頭播放歌曲並疊加節拍器 click（只有試聽有 click，遊戲中沒有）；調整 BPM 或偏移會即時生效</p>
       </section>
 
       <section class="card">
@@ -109,7 +105,6 @@
           <p class="hint">按下後攻擊會立即起手，並落在這個切分網格上（離拍也不會消失，只是較弱）；自動＝依 BPM 取每格不短於約 110 ms 的最細切分</p>
         </div>
         <div class="row">
-          <label class="check"><input id="chk-metronome" type="checkbox" checked> 節拍器</label>
           <label class="check"><input id="chk-reduce" type="checkbox"> 減少閃爍</label>
         </div>
         <div class="grid2">

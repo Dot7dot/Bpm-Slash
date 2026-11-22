@@ -1,5 +1,5 @@
 // BPM Slash entry point: scene state machine, main loop, input.
-import { AudioEngine } from './audio/audioEngine.js';
+import { AudioEngine, FALLBACK_SONGS } from './audio/audioEngine.js';
 import { Conductor } from './audio/conductor.js';
 import { Game } from './game/game.js';
 import { Level } from './game/level.js';
@@ -10,7 +10,7 @@ import { Menu } from './ui/menu.js';
 import { showResults, hideResults } from './ui/results.js';
 import { loadSettings, saveSettings } from './ui/settings.js';
 import { installDebugHook, pushLog } from './debug/debugHook.js';
-import { clampBpm } from './core/beatMath.js';
+import { clampBpm, roundBpm } from './core/beatMath.js';
 import { sanitizeSubdivision } from './ui/settings.js';
 import { W, H } from './game/constants.js';
 
@@ -26,7 +26,11 @@ class App {
     this.conductor = new Conductor(this.engine);
     this.scene = 'menu'; // menu | countin | playing | paused | results
     this.prevScene = 'menu';
-    this.song = null;
+    this.song = null; // { id|null, name, buffer, isDefault (= built-in), meta? }
+    this.songList = FALLBACK_SONGS.map((e) => ({ ...e }));
+    this.songCache = new Map(); // id -> { buffer, meta, fallback }
+    this._songToken = 0;
+    this._songLoading = null;
     this.game = null;
     this.previewing = false;
     this.invincible = false;
@@ -51,7 +55,8 @@ class App {
     // Push saved settings into the conductor now (no AudioContext needed), so the
     // debug state and the UI agree right after a reload.
     this.applyParams();
-    this.useDefaultSong(false);
+    this.menu.renderSongs(this.songList);
+    this.songReady = this.initSongs();
     requestAnimationFrame((t) => this.frame(t));
   }
 
@@ -82,27 +87,59 @@ class App {
   }
 
   // ---------- songs ----------
-  async useDefaultSong(applyMeta) {
+  /** Load songs.json (fallback list on failure), then select the remembered built-in song without touching BPM/offset. */
+  async initSongs() {
+    this.songList = await this.engine.loadSongList();
+    this.menu.renderSongs(this.songList);
+    await this.selectSong(this.settings.songId, false);
+  }
+
+  /**
+   * Select a built-in song by id (unknown id -> first entry). Decoded buffers are cached per id.
+   * applyMeta: also apply the song's BPM (integer) and first-beat offset. Stale loads (a newer selection won) are dropped.
+   */
+  selectSong(id, applyMeta = true) {
+    const p = this._selectSong(id, applyMeta);
+    this._songLoading = p;
+    p.finally(() => { if (this._songLoading === p) this._songLoading = null; });
+    return p;
+  }
+
+  async _selectSong(id, applyMeta) {
     this.stopPreview();
-    this.menu.setSongStatus('載入預設曲中…');
-    const r = await this.engine.loadDefaultSong();
-    this.song = { name: r.meta.title || '預設曲', buffer: r.buffer, isDefault: true, meta: r.meta };
-    if (applyMeta) {
-      this.settings.bpm = clampBpm(r.meta.bpm || 88);
-      this.settings.offsetMs = r.meta.offsetMs || 0;
-      this.settingsChanged();
-      this.menu.syncInputs();
+    const list = this.songList;
+    const entry = list.find((e) => e.id === id) || list[0];
+    const token = ++this._songToken;
+    this.menu.setSongStatus(`載入「${entry.title}」中…`);
+    this.menu.setSelectedSong(entry.id);
+    let r = this.songCache.get(entry.id);
+    if (!r) {
+      r = await this.engine.loadBuiltinSong(entry);
+      if (!r.fallback) this.songCache.set(entry.id, r);
     }
+    if (token !== this._songToken) return; // a newer selection / upload superseded this one
+    this.song = { id: entry.id, name: r.meta.title || entry.title, buffer: r.buffer, isDefault: true, meta: r.meta };
+    this.settings.songId = entry.id;
+    if (applyMeta) {
+      this.settings.bpm = roundBpm(r.meta.bpm || entry.bpm);
+      this.settings.offsetMs = r.meta.offsetMs || 0;
+    }
+    this.settingsChanged();
+    if (applyMeta) this.menu.syncInputs();
+    this.menu.setSelectedSong(entry.id);
     this.menu.setSongStatus(`目前歌曲：${this.song.name}（${this._fmtDur(r.buffer.duration)}）`);
-    this.menu.message(r.fallback ? '找不到預設曲檔案，已改用內建簡易節拍音軌（僅供測試）' : '', r.fallback);
+    this.menu.message(r.fallback ? '找不到歌曲檔案，已改用內建簡易節拍音軌（僅供測試）' : '', r.fallback);
   }
 
   async loadUploadedFile(file) {
     this.stopPreview();
     this.menu.message('解碼中…');
+    const token = ++this._songToken;
     try {
       const buffer = await this.engine.decode(await file.arrayBuffer());
-      this.song = { name: file.name, buffer, isDefault: false };
+      if (token !== this._songToken) return;
+      this.song = { id: null, name: file.name, buffer, isDefault: false };
+      this.menu.setSelectedSong(null); // uploads are not remembered and no built-in card stays highlighted
       this.menu.setSongStatus(`目前歌曲：${file.name}（${this._fmtDur(buffer.duration)}）`);
       this.menu.message('已載入。請設定 BPM 與第一拍偏移，並用「試聽對拍」確認是否對齊。');
     } catch (e) {
@@ -113,7 +150,7 @@ class App {
   _fmtDur(sec) { const m = Math.floor(sec / 60), s = Math.floor(sec % 60); return `${m}:${String(s).padStart(2, '0')}`; }
 
   /**
-   * Song map (intensity per bar). Default song: hand-made `sections` from its JSON; uploaded songs: analyzed
+   * Song map (intensity per bar). Built-in songs: hand-made `sections` from its JSON; uploaded songs: analyzed
    * with analyzeSongMap (dynamic import, any failure falls back to null = all 'mid'). Cached per song/BPM/offset.
    */
   async getSongMap() {
@@ -158,13 +195,28 @@ class App {
   // ---------- preview ----------
   async togglePreview() {
     if (this.previewing) { this.stopPreview(); return; }
-    if (!this.song) { this.menu.message('尚未載入歌曲', true); return; }
-    await this.engine.resume();
+    if (this._previewStarting) return; // double press while starting
+    this._previewStarting = true;
+    try {
+      // A newly selected song may still be loading: wait so buffer, BPM and offset all belong to the same song.
+      while (this._songLoading) { const p = this._songLoading; try { await p; } catch (e) { /* surfaced elsewhere */ } if (this._songLoading === p) break; }
+      if (!this.song) { this.menu.message('尚未載入歌曲', true); return; }
+      await this.engine.resume();
+      if (this.previewing) return;
+      this._startPreviewNow();
+    } finally { this._previewStarting = false; }
+  }
+
+  _startPreviewNow() {
     const ctx = this.engine.ctx;
     this.applyParams();
     this.conductor.songStartAudioTime = ctx.currentTime + 0.12;
     const src = this.engine.playSong(this.song.buffer, this.conductor.songStartAudioTime);
-    this.engine.startMetronome(this.conductor, { startBeat: 0, enabled: () => true, forceCountIn: false });
+    // The click exists only here (player-initiated alignment tool); gameplay has no metronome (v4).
+    this.engine.startMetronome(this.conductor, {
+      startBeat: 0, enabled: () => true, forceCountIn: false,
+      onClick: (beatIndex, scheduledAudioTime, expectedAudioTime) => pushLog('preview', { beatIndex, scheduledAudioTime, expectedAudioTime }),
+    });
     this.previewing = true;
     src.addEventListener('ended', () => { if (this.engine.source === null || this.engine.source === src) this.stopPreview(); });
     this.menu.setPreviewActive(true);
@@ -185,12 +237,15 @@ class App {
     try {
       this.stopPreview();
       const s = this.settings;
+      // Debug hook only: songId selects a built-in song (applies its BPM/offset); explicit bpm below may keep decimals for audits.
+      if (opts.songId !== undefined) await this.selectSong(opts.songId, true);
+      else if (this._songLoading) await this._songLoading;
       if (opts.bpm !== undefined) s.bpm = clampBpm(opts.bpm);
       if (opts.offsetMs !== undefined) s.offsetMs = Math.max(0, opts.offsetMs);
       if (opts.subdivision !== undefined) s.subdivision = sanitizeSubdivision(opts.subdivision);
       if (opts.lateGraceMs !== undefined) s.lateGraceMs = Math.max(0, opts.lateGraceMs);
       if (!opts.fromDebug) saveSettings(s);
-      if (!this.song) await this.useDefaultSong(false);
+      if (!this.song) await this.selectSong(s.songId, false);
       await this.engine.resume();
       const ctx = this.engine.ctx;
       const cond = this.conductor;
@@ -214,10 +269,7 @@ class App {
       game.invincible = this.invincible;
       this.game = game;
       cond.onBeat((ev) => game.onBeat(ev));
-      this.engine.startMetronome(cond, {
-        startBeat: -4, forceCountIn: true, enabled: () => this.settings.metronome,
-        onClick: (beatIndex, scheduledAudioTime, expectedAudioTime) => pushLog('metronome', { beatIndex, scheduledAudioTime, expectedAudioTime }),
-      });
+      // v4: no metronome clicks during gameplay (the count-in is visual only).
 
       this.menu.hide();
       hideResults();

@@ -6,9 +6,10 @@
 //        [--skip-browser] [--skip-wav] [--json <reportPath>] [--quick]
 //        [--shots <dir>] [--bars 4] [--seed 12345] [--headed]
 //
-// Part A：離線分析（去鼓）背景音樂 WAV（貝斯／旋律音符 onset 對 8 分音符網格的誤差 + 獨立估計 tempo；88 或 ×2 皆接受）。
+// Part A：逐首離線分析 assets/audio/songs.json 的內建去鼓曲 WAV（各用自己的 BPM；--wav 可只分析單一檔）（貝斯／旋律音符 onset 對 16 分音符網格的誤差 + 獨立估計 tempo；88 或 ×2 皆接受）。
 // Part B：以 Playwright 開啟遊戲，透過 window.__BPM_SLASH_DEBUG__ 驗證
-//         BeatSnap 攻擊量化（雙鼓各自佇列）、齊奏、鼓手節奏型 groove、拍點事件、世界事件、節拍器、鼓組音效
+//         BeatSnap 攻擊量化（雙鼓各自佇列）、齊奏、鼓手節奏型 groove、拍點事件、世界事件、
+//         遊戲中無節拍器（B7）與試聽對拍的 click 排程（B7p）、鼓組音效
 //         （DESIGN-BEATSNAP.md §3–§11、DESIGN-DRUMMER.md §2–§7 與 DESIGN.md §5 §7）。
 // 結束碼：沒有任何 FAIL 才是 0。
 //
@@ -18,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
+import { detectBpm } from '../js/core/bpmDetect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -55,13 +57,13 @@ function parseArgs(argv) {
 
 const HELP = `rhythm-audit：BPM Slash 節奏對拍稽核
   --url <baseUrl>   使用已啟動的伺服器（預設自動啟動 tools/serve.mjs）
-  --wav <path>      要分析的 WAV（預設 assets/audio/default-88bpm.wav）
+  --wav <path>      只分析這個 WAV（預設：逐首分析 assets/audio/songs.json 的內建曲，找不到清單時用 default-88bpm.wav）
   --bpm <n>         Part A 的標稱 BPM（預設讀同名 .json，否則 88）
   --skip-browser    略過 Part B
   --skip-wav        略過 Part A
   --json <path>     輸出機器可讀的 JSON 報告
   --only <bpm,..>   Part B 只跑指定 BPM 的設定（例：--only 240）
-  --quick           Part B 只跑 88 auto、150 auto、120 strict
+  --quick           Part B 只跑 88 auto、150 auto、120 strict、midnight-funk（100 BPM）
   --shots <dir>     每個設定存一張截圖
   --bars <n>        每個設定連按的小節數（預設 6）
   --seed <n>        PRNG 種子
@@ -284,6 +286,27 @@ export function estimateTempo(flux, hopSec) {
   return { bpm, confidence: R[bestL] / r0 };
 }
 
+/** Built-in songs from assets/audio/songs.json (fallback: the default WAV only). */
+function listBuiltinSongs(opts) {
+  if (opts.wav) return [{ id: path.basename(opts.wav), wav: path.resolve(opts.wav), bpm: opts.bpm }];
+  try {
+    const list = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'assets/audio/songs.json'), 'utf8'));
+    const ok = list.filter((e) => e && e.wav).map((e) => ({ id: e.id, wav: path.resolve(REPO_ROOT, e.wav), bpm: Number.isFinite(opts.bpm) ? opts.bpm : Number(e.bpm) }));
+    if (ok.length) return ok;
+  } catch (e) { /* fall through to the default WAV */ }
+  return [{ id: 'default', wav: path.join(REPO_ROOT, 'assets/audio/default-88bpm.wav'), bpm: opts.bpm }];
+}
+
+function analyzeAllWavs(opts) {
+  const checks = []; const reports = {};
+  for (const song of listBuiltinSongs(opts)) {
+    const a = analyzeWav({ wav: song.wav, bpm: song.bpm });
+    for (const it of a.checks) checks.push({ ...it, id: `${it.id}`, name: `[${song.id}] ${it.name}` });
+    reports[song.id] = a.report;
+  }
+  return { checks, report: reports };
+}
+
 function analyzeWav(opts) {
   const c = new Checks();
   const wavPath = path.resolve(opts.wav || path.join(REPO_ROOT, 'assets/audio/default-88bpm.wav'));
@@ -319,7 +342,7 @@ function analyzeWav(opts) {
 
   // 軟起音（貝斯 / 旋律 6–10 ms 漸強）會讓門檻偵測系統性偏晚，所以用 refine 回推到音符升起處。
   const { onsets, flux, hopSec } = detectOnsets(wav.samples, wav.sampleRate, { refine: true });
-  const half = 30 / bpm;
+  const half = 15 / bpm; // 16th-note grid (midnight-funk has deliberate 16th syncopation)
   const errs = onsets.map((t) => {
     const k = Math.round((t - offsetSec) / half);
     return t - (k * half + offsetSec);
@@ -334,7 +357,7 @@ function analyzeWav(opts) {
   report.onsets = { count: onsets.length, meanAbsMs: st.mean * 1000, p95Ms: st.p95 * 1000, maxMs: st.max * 1000, within10msFraction: within10, fitOffsetMs: fitOffset * 1000 };
   const drumless = report.meta && report.meta.drums === false;
   report.drumless = !!drumless;
-  c.check('A2', `${drumless ? '去鼓背景音樂：貝斯／旋律音符' : 'onset'} 對齊 8 分音符網格（平均誤差 ≤ 5 ms）`,
+  c.check('A2', `${drumless ? '去鼓背景音樂：貝斯／旋律音符' : 'onset'} 對齊 16 分音符網格（k×15/bpm＋offset；平均誤差 ≤ 5 ms）`,
     onsets.length >= 8 && st.mean <= 0.005,
     `onset=${onsets.length}，平均 |誤差|=${ms(st.mean)} ms，p95=${ms(st.p95)} ms，max=${ms(st.max)} ms，±10 ms 內=${f(within10 * 100, 1)}%（網格偏移 ${f(offsetSec * 1000, 1)} ms；擬合偏移 ${ms(fitOffset, 1)} ms）`,
     report.onsets);
@@ -345,16 +368,20 @@ function analyzeWav(opts) {
     report.denseOnsets = { count: dense.length, meanAbsMs: ds.mean * 1000, p95Ms: ds.p95 * 1000 };
     c.add('A2d', '較敏感偵測（rise ≥ 4 dB）的參考統計', 'INFO', `onset=${dense.length}，平均 |誤差|=${ms(ds.mean)} ms，p95=${ms(ds.p95)} ms（含較多其他聲部與瞬態，僅供參考）`);
   }
+  // A3：遊戲自己的 detectBpm（選單「自動偵測」用的同一個模組）必須回報歌曲的 BPM（±0.5）。
+  // 剛好差一個八度（×2 或 ÷2）→ WARN；其他一律 FAIL。
+  let det = null;
+  try { det = detectBpm(wav.samples, wav.sampleRate); } catch (e) { det = { bpm: NaN, error: e.message }; }
+  report.detectBpm = det;
+  const dBpm = det && Number.isFinite(det.bpm) ? det.bpm : NaN;
+  const exact = Math.abs(dBpm - bpm) <= 0.5;
+  const octave = Math.abs(dBpm - 2 * bpm) <= 1.0 || Math.abs(dBpm - bpm / 2) <= 0.25;
+  c.add('A3', `遊戲 detectBpm（js/core/bpmDetect.js）= ${bpm} BPM（±0.5）`, exact ? 'PASS' : octave ? 'WARN' : 'FAIL',
+    `detectBpm=${f(dBpm, 3)} BPM（信心 ${f(det && det.confidence, 2)}，第一拍 ${f(((det && det.offsetSec) || 0) * 1000, 1)} ms）${exact ? '' : octave ? '；差一個八度（×2 或 ÷2）' : '；與標稱 BPM 不符'}`, det);
+  // 獨立自相關估計：僅供參考（切分音曲目可能落在簡單比例）
   const tempo = estimateTempo(flux, hopSec);
   report.tempo = tempo;
-  // 去鼓曲沒有每拍的大鼓，onset 密度以八分音符為主：估計值為 bpm 或其 2 倍（例 176）都視為 bpm，並在說明中記錄。
-  const ratio = tempo.bpm / bpm;
-  const direct = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - bpm) <= 0.5;
-  const doubled = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - 2 * bpm) <= 1.0;
-  const halved = Number.isFinite(tempo.bpm) && Math.abs(tempo.bpm - bpm / 2) <= 0.5;
-  c.check('A3', `獨立估計 tempo = ${bpm} BPM（或 ×2 = ${2 * bpm}，視為同一 tempo）`,
-    direct || doubled || halved,
-    `估計 ${f(tempo.bpm, 3)} BPM（信心 ${f(tempo.confidence, 2)}）${direct ? '' : doubled ? `；為標稱的 ${f(ratio, 2)} 倍（去鼓伴奏的 onset 落在八分音符，倍速判定為 ${bpm}）` : halved ? '；為標稱的一半，視為同一 tempo' : ''}`, tempo);
+  c.add('A3i', '獨立自相關 tempo 估計（僅供參考）', 'INFO', `估計 ${f(tempo.bpm, 3)} BPM（信心 ${f(tempo.confidence, 2)}；標稱 ${bpm}，比值 ${f(tempo.bpm / bpm, 3)}）`, tempo);
   return { checks: c.items, report };
 }
 
@@ -788,28 +815,10 @@ export function analyzeRun(data, cfg) {
     }
   }
 
-  // 7. 節拍器
-  {
-    const bad = []; const errs = [];
-    const b0 = state.beat0AudioTime;
-    for (let i = 0; i < metro.length; i++) {
-      const m = metro[i];
-      const problems = [];
-      if (i > 0 && m.beatIndex !== metro[i - 1].beatIndex + 1) problems.push(`beatIndex ${metro[i - 1].beatIndex}→${m.beatIndex} 漏拍或重複`);
-      const e = Math.abs(m.scheduledAudioTime - m.expectedAudioTime);
-      errs.push(e);
-      if (!(e <= 0.001)) problems.push(`|scheduled-expected|=${ms(e, 3)}ms > 1ms`);
-      if (Number.isFinite(b0)) {
-        const e2 = Math.abs(m.expectedAudioTime - (b0 + m.beatIndex * beatDur));
-        if (e2 > 1e-4) problems.push(`expected 與 beat0+n×beatDur 差 ${ms(e2, 3)}ms`);
-      }
-      if (problems.length) bad.push(`beat ${m.beatIndex}: ${problems.join(', ')}`);
-    }
-    const st = stats(errs);
-    c.check('B7', '節拍器排程誤差 ≤ 1 ms 且連續', metro.length > 0 && bad.length === 0,
-      `n=${metro.length}，|scheduled-expected| 平均 ${ms(st.mean, 4)} / max ${ms(st.max, 4)} ms${metro.length === 0 ? '；節拍器 log 為空' : ''}${bad.length ? '；' + firstN(bad) : ''}`,
-      { n: metro.length, errMaxMs: st.max * 1000 });
-  }
+  // 7. 遊戲中沒有節拍器（v4）：metronome log 必須是空的（含預備拍）
+  c.check('B7', '遊戲中沒有節拍器 click（metronome log 為空，含預備拍）', metro.length === 0,
+    metro.length === 0 ? '0 個 click' : `記錄到 ${metro.length} 個 click：${firstN(metro.slice(0, 4).map((m) => `beat ${m.beatIndex}`))}`,
+    { n: metro.length });
 
   // 8. console / page error
   c.check('B8', '無 console error / page error', errors.length === 0, errors.length ? firstN(errors, 4) : '乾淨');
@@ -912,7 +921,7 @@ async function runConfig(browser, baseUrl, cfg, opts) {
 
     await call('setInvincible', true);
     await call('clearLogs');
-    await withTimeout(call('start', { bpm: cfg.bpm, subdivision: cfg.subdivision ?? 'auto', lateGraceMs: cfg.lateGraceMs ?? 45 }), 30000, 'start()');
+    await withTimeout(call('start', { ...(cfg.songId ? { songId: cfg.songId } : {}), bpm: cfg.bpm, subdivision: cfg.subdivision ?? 'auto', lateGraceMs: cfg.lateGraceMs ?? 45 }), 30000, 'start()');
     const beatDur = 60 / cfg.bpm;
 
     // 等待進入 playing
@@ -991,12 +1000,15 @@ async function runConfig(browser, baseUrl, cfg, opts) {
     if (opts.shots) {
       try {
         fs.mkdirSync(opts.shots, { recursive: true });
-        await page.screenshot({ path: path.join(opts.shots, `rhythm-${cfg.bpm}-${cfg.subdivision ?? 'auto'}${cfg.lateGraceMs === 0 ? '-strict' : ''}.png`) });
+        await page.screenshot({ path: path.join(opts.shots, `rhythm-${cfg.songId ? cfg.songId + '-' : ''}${cfg.bpm}-${cfg.subdivision ?? 'auto'}${cfg.lateGraceMs === 0 ? '-strict' : ''}.png`) });
       } catch (e) { errors.push(`screenshot 失敗：${e.message}`); }
     }
     await call('stop').catch((e) => errors.push(`stop() 失敗：${e.message}`));
     result.data = { attacks, beats, world, metro, state, errors, pressCount };
     result.checks = analyzeRun({ ...result.data }, { ...cfg, bars: opts.bars });
+    if (cfg.songId) {
+      result.checks.unshift({ id: 'B-song', name: '內建曲選擇', status: state.songId === cfg.songId && Math.abs(state.bpm - cfg.bpm) < 1e-9 ? 'PASS' : 'FAIL', detail: `getState().songId=${state.songId}（預期 ${cfg.songId}），bpm=${state.bpm}（預期 ${cfg.bpm}）` });
+    }
     result.checks.unshift({ id: 'B-info', name: '輸入統計', status: 'INFO', detail: `按鍵 ${pressCount} 次（${Object.entries(kinds).map(([k, v]) => `${k}=${v}`).join(' ')}），記錄到攻擊 ${attacks.length}、beat ${beats.length}、world ${world.length}、metronome ${metro.length}` });
   } catch (e) {
     result.fatal = e.message;
@@ -1203,6 +1215,49 @@ async function runOfflineAudit(browser, baseUrl) {
   return { config: { bpm: 'n/a', subdivision: 'offline-render', lateGraceMs: '-' }, checks, data: null, fatal: null };
 }
 
+/** B7p：試聽對拍（preview）的 click 排程：每個 click 與預期時間差 ≤ 1 ms，且 beatIndex 連續。 */
+async function runPreviewAudit(browser, baseUrl) {
+  const checks = [];
+  const errors = [];
+  const context = await browser.newContext({ viewport: { width: 960, height: 540 } });
+  const page = await context.newPage();
+  page.on('console', (m) => { if (m.type() === 'error' && !/favicon/i.test(m.text()) && !/favicon/i.test(m.location()?.url || '')) errors.push(`console.error: ${m.text()}`); });
+  page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+  const call = (name, ...args) => page.evaluate(async ({ name, args }) => window.__BPM_SLASH_DEBUG__[name](...args), { name, args });
+  try {
+    await page.goto(baseUrl, { waitUntil: 'load', timeout: 20000 });
+    await page.waitForFunction(() => !!window.__BPM_SLASH_DEBUG__, null, { timeout: 15000 });
+    await call('clearLogs');
+    const started = await withTimeout(call('startPreview'), 15000, 'startPreview()');
+    await sleep(4500);
+    const state = await call('getState');
+    const log = await call('getPreviewLog');
+    const gameplayLog = await call('getMetronomeLog');
+    await call('stopPreview');
+    const beatDur = 60 / state.bpm; const b0 = state.beat0AudioTime;
+    const bad = []; const errs = [];
+    for (let i = 0; i < log.length; i++) {
+      const m = log[i];
+      if (i > 0 && m.beatIndex !== log[i - 1].beatIndex + 1) bad.push(`beatIndex ${log[i - 1].beatIndex}→${m.beatIndex} 漏拍或重複`);
+      const e = Math.abs(m.scheduledAudioTime - m.expectedAudioTime);
+      errs.push(e);
+      if (!(e <= 0.001)) bad.push(`beat ${m.beatIndex}: |scheduled-expected|=${ms(e, 3)}ms > 1ms`);
+      const e2 = Math.abs(m.expectedAudioTime - (b0 + m.beatIndex * beatDur));
+      if (e2 > 1e-4) bad.push(`beat ${m.beatIndex}: expected 與 beat0+n×beatDur 差 ${ms(e2, 3)}ms`);
+    }
+    const st = stats(errs);
+    checks.push({ id: 'B7p', name: '試聽對拍的 click 排程誤差 ≤ 1 ms 且連續', status: started && log.length >= 4 && bad.length === 0 ? 'PASS' : 'FAIL',
+      detail: `n=${log.length}，|scheduled-expected| 平均 ${ms(st.mean, 4)} / max ${ms(st.max, 4)} ms${bad.length ? '；' + firstN(bad) : ''}；試聽不寫入遊戲 metronome log（${gameplayLog.length} 筆）` });
+    if (gameplayLog.length) checks.push({ id: 'B7p2', name: '試聽 click 不污染遊戲 metronome log', status: 'FAIL', detail: `${gameplayLog.length} 筆` });
+    checks.push({ id: 'B8p', name: '試聽期間無 console error / page error', status: errors.length ? 'FAIL' : 'PASS', detail: errors.length ? firstN(errors, 4) : '乾淨' });
+  } catch (e) {
+    checks.push({ id: 'B7p', name: '試聽對拍稽核', status: 'FAIL', detail: e.message });
+  } finally {
+    await context.close().catch(() => {});
+  }
+  return { config: { bpm: 'n/a', subdivision: 'preview-clicks', lateGraceMs: '-' }, checks, data: null, fatal: null };
+}
+
 async function runBrowserPart(opts, baseUrl) {
   const pw = loadPlaywright();
   if (!pw) {
@@ -1215,8 +1270,9 @@ async function runBrowserPart(opts, baseUrl) {
     return { status: 'SKIPPED', reason: `無法啟動 Chromium：${e.message.split('\n')[0]}（可試 npx playwright install chromium）`, configs: [] };
   }
   const matrix = opts.quick
-    ? [{ bpm: 88 }, { bpm: 150 }, { bpm: 120, lateGraceMs: 0 }]
-    : [{ bpm: 88 }, { bpm: 88, subdivision: 2 }, { bpm: 120 }, { bpm: 150 }, { bpm: 40 }, { bpm: 240 }, { bpm: 120, lateGraceMs: 0 }];
+    ? [{ bpm: 88 }, { bpm: 150 }, { bpm: 120, lateGraceMs: 0 }, { songId: 'midnight-funk', bpm: 100 }]
+    : [{ bpm: 88 }, { bpm: 88, subdivision: 2 }, { bpm: 120 }, { bpm: 150 }, { bpm: 40 }, { bpm: 240 }, { bpm: 120, lateGraceMs: 0 },
+      { songId: 'midnight-funk', bpm: 100 }, { songId: 'starlight-runner', bpm: 112 }];
   const configs = [];
   try {
     for (const cfg of matrix.filter((c) => !opts.only || opts.only.includes(c.bpm))) {
@@ -1225,9 +1281,10 @@ async function runBrowserPart(opts, baseUrl) {
       const lg = cfg.lateGraceMs ?? 45;
       const full = { subdivision: 'auto', ...cfg, lateGraceMs: lg };
       full.expectStep = stepRef(full.subdivision, full.bpm);
-      console.error(`… 執行 bpm=${full.bpm} subdivision=${full.subdivision}（stepTicks ${full.expectStep}）lateGraceMs=${lg}（${bars} 小節，約 ${Math.round(bars * 4 * 60 / cfg.bpm + 4 * 60 / cfg.bpm + 4)} 秒）`);
+      console.error(`… 執行 ${full.songId ? `song=${full.songId} ` : ''}bpm=${full.bpm} subdivision=${full.subdivision}（stepTicks ${full.expectStep}）lateGraceMs=${lg}（${bars} 小節，約 ${Math.round(bars * 4 * 60 / cfg.bpm + 4 * 60 / cfg.bpm + 4)} 秒）`);
       configs.push(await runConfig(browser, baseUrl, full, { ...opts, bars }));
     }
+    if (!opts.only) configs.push(await runPreviewAudit(browser, baseUrl));
     configs.push(await runOfflineAudit(browser, baseUrl));
   } finally {
     await browser.close().catch(() => {});
@@ -1261,7 +1318,7 @@ async function main() {
     full.parts.wav = { status: 'SKIPPED', reason: '--skip-wav' };
   } else {
     try {
-      const a = analyzeWav(opts);
+      const a = analyzeAllWavs(opts);
       printChecks(a.checks);
       full.parts.wav = { status: a.checks.some((x) => x.status === 'FAIL') ? 'FAIL' : a.checks.every((x) => x.status === 'SKIPPED') ? 'SKIPPED' : 'PASS', checks: a.checks, report: a.report };
       if (a.checks.some((x) => x.status === 'FAIL')) anyFail = true;
@@ -1303,7 +1360,7 @@ async function main() {
           for (const r of b.configs) {
             const cfgFail = r.checks.some((x) => x.status === 'FAIL');
             if (cfgFail) partFail = true;
-            console.log(`\n### bpm=${r.config.bpm}  subdivision=${r.config.subdivision}  grace=${r.config.lateGraceMs}ms  → ${cfgFail ? 'FAIL' : 'PASS'}`);
+            console.log(`\n### ${r.config.songId ? `song=${r.config.songId}  ` : ''}bpm=${r.config.bpm}  subdivision=${r.config.subdivision}  grace=${r.config.lateGraceMs}ms  → ${cfgFail ? 'FAIL' : 'PASS'}`);
             printChecks(r.checks);
           }
           full.parts.browser = {
@@ -1322,7 +1379,7 @@ async function main() {
   console.log('\n==================== 總結 ====================');
   for (const [k, v] of Object.entries(full.parts)) {
     console.log(`  ${k === 'wav' ? 'Part A (WAV)' : 'Part B (browser)'}: ${v.status}${v.reason ? ` — ${v.reason}` : ''}`);
-    if (v.configs) for (const c of v.configs) console.log(`      bpm=${c.config.bpm} 切分=${c.config.subdivision}${c.config.expectStep ? `(step ${c.config.expectStep})` : ''} grace=${c.config.lateGraceMs}: ${c.status}`);
+    if (v.configs) for (const c of v.configs) console.log(`      ${c.config.songId ? `song=${c.config.songId} ` : ''}bpm=${c.config.bpm} 切分=${c.config.subdivision}${c.config.expectStep ? `(step ${c.config.expectStep})` : ''} grace=${c.config.lateGraceMs}: ${c.status}`);
   }
   full.summary = { result: anyFail ? 'FAIL' : 'PASS', exitCode: anyFail ? 1 : 0 };
   console.log(`  結果：${anyFail ? 'FAIL（有失敗項目）' : 'PASS（沒有 FAIL）'}`);

@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node tools/serve.mjs",
     "test": "node --test \"tests/*.test.mjs\"",
-    "generate:song": "node tools/generate-default-song.mjs",
+    "generate:song": "node tools/generate-default-song.mjs && node tools/generate-extra-songs.mjs",
     "audit:rhythm": "node tools/rhythm-audit.mjs"
   }
 }

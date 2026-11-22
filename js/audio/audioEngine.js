@@ -1,4 +1,4 @@
-// AudioEngine: AudioContext ownership, decoding, song playback, SFX synthesis, metronome scheduler.
+// AudioEngine: AudioContext ownership, decoding, song playback, SFX synthesis, metronome scheduler (preview only since v4).
 import { mod } from '../core/beatMath.js';
 import { SfxVoices, makeNoiseBuffer, KIND_TO_DESC } from './sfxVoices.js';
 
@@ -16,7 +16,12 @@ export function makeLimiterCurve(knee = 0.75, n = 4097) {
 const METRO_LOOKAHEAD_SEC = 0.2;
 const LATE_CATCHUP_SEC = 0.05;
 
-const DEFAULT_JSON = { title: '預設曲 Neon Pulse', bpm: 88, offsetMs: 0, beatsPerBar: 4, bars: 32 };
+/** Used only when assets/audio/songs.json cannot be loaded (must match the shipped list). */
+export const FALLBACK_SONGS = [
+  { id: 'neon-step', title: '霓虹步伐 Neon Step', bpm: 88, json: 'assets/audio/default-88bpm.json', wav: 'assets/audio/default-88bpm.wav' },
+  { id: 'midnight-funk', title: '午夜放克 Midnight Funk', bpm: 100, json: 'assets/audio/song-100bpm.json', wav: 'assets/audio/song-100bpm.wav' },
+  { id: 'starlight-runner', title: '星光跑者 Starlight Runner', bpm: 112, json: 'assets/audio/song-112bpm.json', wav: 'assets/audio/song-112bpm.wav' },
+];
 
 export class AudioEngine {
   constructor() {
@@ -102,16 +107,41 @@ export class AudioEngine {
     return await c.decodeAudioData(arrayBuffer);
   }
 
-  /** Load the bundled default song. Falls back to an in-memory click track on failure. */
-  async loadDefaultSong() {
-    let meta = { ...DEFAULT_JSON };
+  /** Built-in song list from assets/audio/songs.json; falls back to the built-in list if the fetch/parse fails. */
+  async loadSongList() {
+    try {
+      const r = await fetch('assets/audio/songs.json', { cache: 'no-store' });
+      if (!r.ok) throw new Error('http ' + r.status);
+      const list = await r.json();
+      const ok = Array.isArray(list) ? list.filter((e) => e && typeof e.id === 'string' && e.wav && Number.isFinite(Number(e.bpm))) : [];
+      if (!ok.length) throw new Error('empty list');
+      const out = ok.map((e) => ({ ...e, bpm: Number(e.bpm) }));
+      // Best effort: read each song's JSON for its length (shown on the card); failures are ignored.
+      await Promise.all(out.map(async (e) => {
+        try {
+          const jr = await fetch(e.json, { cache: 'no-store' });
+          if (jr.ok) { const m = await jr.json(); if (Number.isFinite(Number(m.durationSec))) e.durationSec = Number(m.durationSec); }
+        } catch (x) { /* ignore */ }
+      }));
+      return out;
+    } catch (e) {
+      return FALLBACK_SONGS.map((x) => ({ ...x }));
+    }
+  }
+
+  /**
+   * Load one built-in song entry ({ id, title, bpm, json, wav }). Falls back to an in-memory click track on failure.
+   * Decoded buffers are cached per id by the caller (App).
+   */
+  async loadBuiltinSong(entry) {
+    let meta = { title: entry.title, bpm: entry.bpm, offsetMs: 0, beatsPerBar: 4, bars: 32 };
     let metaOk = false;
     try {
-      const r = await fetch('assets/audio/default-88bpm.json', { cache: 'no-store' });
+      const r = await fetch(entry.json, { cache: 'no-store' });
       if (r.ok) { meta = { ...meta, ...(await r.json()) }; metaOk = true; }
-    } catch (e) { /* use built-in defaults */ }
+    } catch (e) { /* use entry defaults */ }
     try {
-      const r = await fetch('assets/audio/default-88bpm.wav');
+      const r = await fetch(entry.wav);
       if (!r.ok) throw new Error('http ' + r.status);
       const buffer = await this.decode(await r.arrayBuffer());
       return { buffer, meta, fallback: false, metaOk };
@@ -189,7 +219,10 @@ export class AudioEngine {
   startMetronome(cond, { startBeat = -4, enabled = () => true, forceCountIn = true, onClick } = {}) {
     this.stopMetronome();
     const ctx = this.ensure();
-    const m = { next: startBeat, min: startBeat, ver: cond.paramsVersion, timer: 0 };
+    // Per-preview gain: stopMetronome() zeroes + disconnects it, silencing clicks already scheduled inside the lookahead.
+    const bus = ctx.createGain();
+    bus.connect(this.clickGain);
+    const m = { next: startBeat, min: startBeat, ver: cond.paramsVersion, timer: 0, bus };
     const tick = () => {
       if (ctx.state !== 'running') return;
       const now = ctx.currentTime;
@@ -206,7 +239,7 @@ export class AudioEngine {
           if ((m.next < 0 && forceCountIn) || (m.next >= 0 && enabled())) {
             const when = Math.max(expected, now);
             this.lastClickCtxNow = now;
-            this.playClick(when, mod(m.next, 4) === 0);
+            this.playClick(when, mod(m.next, 4) === 0, m.bus);
             if (onClick) onClick(m.next, when, expected, now);
           }
         }
@@ -219,7 +252,12 @@ export class AudioEngine {
   }
 
   stopMetronome() {
-    if (this._metro) { clearInterval(this._metro.timer); this._metro = null; }
+    const m = this._metro;
+    if (!m) return;
+    clearInterval(m.timer);
+    this._metro = null;
+    try { m.bus.gain.cancelScheduledValues(0); m.bus.gain.value = 0; } catch (e) { /* ignore */ }
+    try { m.bus.disconnect(); } catch (e) { /* ignore */ }
   }
 
   // ---------- SFX synthesis ----------
@@ -227,7 +265,7 @@ export class AudioEngine {
   _tone(when, o) { this.voices.tone(when, o); }
   _noise(when, o) { this.voices.noise(when, o); }
 
-  playClick(when, accent) { this.voices.click(when, accent); }
+  playClick(when, accent, out) { this.voices.click(when, accent, out); }
 
   /**
    * v3 hit SFX (drum kit; desc.instrument 'kick'|'snare') scheduled on the audio clock.

@@ -1,6 +1,5 @@
 // HTML menu wiring (DESIGN section 9.1).
-import { TapTempo } from '../core/tapTempo.js';
-import { clampBpm, beatInfoAt, pulseAt } from '../core/beatMath.js';
+import { roundBpm, beatInfoAt, pulseAt } from '../core/beatMath.js';
 import { resolveSubdivision, SUBDIVISION_NAMES } from '../core/beatSnap.js';
 import { sanitizeSubdivision } from './settings.js';
 
@@ -9,7 +8,6 @@ const $ = (id) => document.getElementById(id);
 export class Menu {
   constructor(app) {
     this.app = app;
-    this.tap = new TapTempo();
     this.detected = null;
     this._rafId = 0;
     this._bind();
@@ -39,6 +37,39 @@ export class Menu {
 
   setSongStatus(text) { $('song-status').textContent = text; }
 
+  /** Render the built-in song cards (title, BPM, length). Safe to call again when the list is replaced. */
+  renderSongs(list) {
+    const box = $('song-list');
+    box.textContent = '';
+    for (const e of list) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'song-card';
+      b.dataset.songId = e.id;
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', 'false');
+      const dur = Number.isFinite(e.durationSec) ? e.durationSec : (32 * 4 * 60) / e.bpm;
+      const name = document.createElement('span'); name.className = 'song-title'; name.textContent = String(e.title).replace(/\s*[（(][^）)]*版[）)]\s*$/, ''); // card shows the short name
+      const meta = document.createElement('span'); meta.className = 'song-meta';
+      const bpm = document.createElement('b'); bpm.textContent = `${Math.round(e.bpm)} BPM`;
+      meta.append(bpm, ` · ${this.app._fmtDur(dur)}`);
+      b.append(name, meta);
+      b.addEventListener('click', () => this.app.selectSong(e.id, true));
+      box.appendChild(b);
+    }
+    this.setSelectedSong(this._selectedSong || null);
+  }
+
+  /** Highlight a built-in song card (null = none, e.g. after an upload). */
+  setSelectedSong(id) {
+    this._selectedSong = id;
+    for (const c of document.querySelectorAll('#song-list .song-card')) {
+      const on = c.dataset.songId === id;
+      c.classList.toggle('selected', on);
+      c.setAttribute('aria-checked', on ? 'true' : 'false');
+    }
+  }
+
   /** Push the current settings into the form controls. */
   syncInputs() {
     const s = this.app.settings;
@@ -49,7 +80,6 @@ export class Menu {
     $('grace-num').value = String(Math.round(s.lateGraceMs));
     for (const r of document.querySelectorAll('input[name="subdiv"]')) r.checked = r.value === String(s.subdivision);
     this.updateSubdivInfo();
-    $('chk-metronome').checked = s.metronome;
     $('chk-reduce').checked = s.reduceFlashing;
     $('music-vol').value = String(s.musicVol);
     $('sfx-vol').value = String(s.sfxVol);
@@ -70,30 +100,29 @@ export class Menu {
     const app = this.app;
     const s = () => app.settings;
 
-    $('btn-default-song').addEventListener('click', () => app.useDefaultSong(true));
     $('file-input').addEventListener('change', (e) => {
       const f = e.target.files && e.target.files[0];
       if (f) app.loadUploadedFile(f);
       e.target.value = '';
     });
 
+    // Every BPM write path rounds to an integer in [40, 240] and writes the result back to both controls.
     const setBpm = (v) => {
-      s().bpm = clampBpm(v);
+      s().bpm = roundBpm(v);
       $('bpm-num').value = String(s().bpm);
       $('bpm-range').value = String(s().bpm);
       this._changed();
     };
-    $('bpm-num').addEventListener('input', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v) && v >= 40 && v <= 240) { s().bpm = clampBpm(v); $('bpm-range').value = String(s().bpm); this._changed(); } });
+    $('bpm-num').addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      if (!Number.isFinite(v) || v < 40 || v > 240) return; // partial typing: wait for 'change'
+      s().bpm = roundBpm(v);
+      $('bpm-range').value = String(s().bpm);
+      if (String(s().bpm) !== e.target.value.trim()) e.target.value = String(s().bpm); // 88.7 -> 89 immediately
+      this._changed();
+    });
     $('bpm-num').addEventListener('change', (e) => setBpm(parseFloat(e.target.value)));
     $('bpm-range').addEventListener('input', (e) => setBpm(parseFloat(e.target.value)));
-
-    $('btn-tap').addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      const bpm = this.tap.tap(e.timeStamp / 1000);
-      if (bpm === null) $('tap-info').textContent = '再點一次…';
-      else { $('tap-info').textContent = `已點擊 ${this.tap.count} 次 → ${bpm} BPM`; setBpm(bpm); }
-    });
-    $('btn-tap').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') e.preventDefault(); });
 
     $('btn-detect').addEventListener('click', () => this.detect());
     $('btn-apply-detect').addEventListener('click', () => {
@@ -118,7 +147,6 @@ export class Menu {
     $('calib-num').addEventListener('input', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { s().inputCalibrationMs = Math.max(-150, Math.min(150, v)); if (s().inputCalibrationMs !== v) e.target.value = String(s().inputCalibrationMs); this._changed(); } });
     $('grace-num').addEventListener('input', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) { s().lateGraceMs = Math.max(0, Math.min(100, v)); if (s().lateGraceMs !== v) e.target.value = String(s().lateGraceMs); this._changed(); } });
     for (const r of document.querySelectorAll('input[name="subdiv"]')) r.addEventListener('change', () => { if (r.checked) { s().subdivision = sanitizeSubdivision(r.value); this._changed(); } });
-    $('chk-metronome').addEventListener('change', (e) => { s().metronome = e.target.checked; this._changed(); });
     $('chk-reduce').addEventListener('change', (e) => { s().reduceFlashing = e.target.checked; this._changed(); });
     $('music-vol').addEventListener('input', (e) => { s().musicVol = parseFloat(e.target.value); this._changed(); });
     $('sfx-vol').addEventListener('input', (e) => { s().sfxVol = parseFloat(e.target.value); this._changed(); });
@@ -150,10 +178,10 @@ export class Menu {
       // The confidence value is only a rough ranking signal, so show a qualitative label instead of a percentage.
       const c = Number(r.confidence) || 0;
       const level = c >= 0.25 ? '高' : c >= 0.12 ? '中' : '低';
-      out.textContent = `建議：${(Math.round(r.bpm * 10) / 10)} BPM，第一拍 ${Math.round((r.offsetSec || 0) * 1000)} ms（可信度：${level}）。建議按「試聽對拍」用耳朵確認後再套用`;
+      out.textContent = `建議：${roundBpm(r.bpm)} BPM，第一拍 ${Math.round((r.offsetSec || 0) * 1000)} ms（可信度：${level}）。建議按「試聽對拍」用耳朵確認後再套用`;
       $('btn-apply-detect').classList.remove('hidden');
     } catch (e) {
-      out.textContent = '自動偵測失敗，請改用 Tap Tempo 或手動輸入';
+      out.textContent = '自動偵測失敗，請改用手動輸入';
     }
   }
 

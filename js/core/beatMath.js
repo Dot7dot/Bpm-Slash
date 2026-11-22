@@ -16,6 +16,13 @@ export function clampBpm(bpm) {
   return Math.min(MAX_BPM, Math.max(MIN_BPM, Math.round(bpm * 10) / 10));
 }
 
+/** Player-facing BPM: integer in [40, 240] (non-finite -> default). The engine itself still accepts decimals (audits). */
+export function roundBpm(bpm) {
+  const n = Number(bpm);
+  if (!Number.isFinite(n)) return DEFAULT_BPM;
+  return Math.min(MAX_BPM, Math.max(MIN_BPM, Math.round(n)));
+}
+
 export function beatDur(bpm) { return 60 / bpm; }
 export function halfStep(bpm) { return 30 / bpm; }
 

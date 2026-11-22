@@ -1,0 +1,23 @@
+[
+  {
+    "id": "neon-step",
+    "title": "霓虹步伐 Neon Step（去鼓伴奏版）",
+    "bpm": 88,
+    "json": "assets/audio/default-88bpm.json",
+    "wav": "assets/audio/default-88bpm.wav"
+  },
+  {
+    "id": "midnight-funk",
+    "title": "午夜放克 Midnight Funk（去鼓伴奏版）",
+    "bpm": 100,
+    "json": "assets/audio/song-100bpm.json",
+    "wav": "assets/audio/song-100bpm.wav"
+  },
+  {
+    "id": "starlight-runner",
+    "title": "星光跑者 Starlight Runner（去鼓伴奏版）",
+    "bpm": 112,
+    "json": "assets/audio/song-112bpm.json",
+    "wav": "assets/audio/song-112bpm.wav"
+  }
+]

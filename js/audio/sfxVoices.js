@@ -79,8 +79,7 @@ export class SfxVoices {
     s.start(when, (this._nz = ((this._nz || 0) + 0.137) % 0.5)); s.stop(when + attack + dur + 0.02);
   }
 
-  click(when, accent) {
-    const out = this.dest.click;
+  click(when, accent, out = this.dest.click) {
     this.tone(when, { type: 'sine', f0: accent ? 1760 : 1100, dur: 0.045, gain: accent ? 0.55 : 0.4, out, attack: 0.001 });
     this.tone(when, { type: 'triangle', f0: accent ? 880 : 550, dur: 0.03, gain: 0.2, out, attack: 0.001 });
   }

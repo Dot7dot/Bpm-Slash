@@ -71,6 +71,32 @@
 - F4（**總監最終裁定，取代先前的 25 ms**）：「延遲容許」預設值為 **45 ms**，與 PERFECT 判定窗一致。v3 鼓手實測顯示：稍晚 25–45 ms 的按鍵若被吸附到下一個十六分音符，會變成很輕的 ghost note 卻顯示 PERFECT，回饋互相矛盾；對鼓手而言「稍晚按、立即響」才自然。網格吸附用於提早與離拍的按鍵。`beatSnap.js` 的 `DEFAULT_LATE_GRACE` 同步為 0.045。已保存的使用者設定照舊沿用。
 - 設定頁顯示偵測到的輸出延遲（`outputLatency + baseLatency`，ms），並提示：「鼓聲要精準落在拍上，可比拍點提早約 N ms 按下；藍牙耳機延遲很大，建議改用有線耳機或喇叭」。
 
+## 6b. v4 更新：曲目選擇、整數 BPM、移除 Tap Tempo 與背景節拍器（總監）
+
+### 新增兩首原創去鼓伴奏（Haiku-Songs）
+所有內建曲都是**去鼓伴奏**（玩家就是鼓手），22050 Hz、16-bit、mono，第一拍在 sample 0（offset 0），32 小節，段落與預設曲相同（0–4 intro low、4–12 verse mid、12–20 chorus high、20–24 breakdown low、24–32 final high）。新腳本 `tools/generate-extra-songs.mjs` 匯出 `renderExtraSong(id, { drums = true })`（含鼓版僅供測試／稽核），CLI 寫出去鼓版。`npm run generate:song` 一次產生全部三首。
+
+| id | 標題 | BPM | 調性與風格 | 檔案 |
+|---|---|---|---|---|
+| `neon-step` | 霓虹步伐 Neon Step（去鼓伴奏版） | 88 | A 小調，既有預設曲 | `assets/audio/default-88bpm.wav/.json` |
+| `midnight-funk` | 午夜放克 Midnight Funk（去鼓伴奏版） | 100 | E 多利安放克：切分十六分貝斯、反拍 clav 和弦、銅管感主旋律 | `assets/audio/song-100bpm.wav/.json` |
+| `starlight-runner` | 星光跑者 Starlight Runner（去鼓伴奏版） | 112 | D 大調合成器流行：十六分琶音、八分撥弦貝斯、明亮主旋律 | `assets/audio/song-112bpm.wav/.json` |
+
+- 曲目清單 `assets/audio/songs.json`：`[{ "id", "title", "bpm", "json", "wav" }]`，依 BPM 排序，`neon-step` 為預設。
+- 每首 JSON 欄位與預設曲相同（`title, bpm, offsetMs, beatsPerBar, bars, durationSec, sampleRate, sections, drums: false`）。
+
+### 選單與遊戲（Sonnet-Menu）
+- 「歌曲」區改為**曲目選擇**：三張內建曲卡片（標題、BPM、長度）＋「上傳去鼓伴奏 WAV / MP4」。選內建曲時自動套用該曲的 BPM 與第一拍偏移；記住上次選的曲目（`settings.songId`，上傳檔不保存）。
+- **移除 Tap Tempo**：按鈕、說明文字、`js/core/tapTempo.js` 與其測試一併移除。
+- **BPM 只能是整數**：數字欄與滑桿 step 1，所有寫入（輸入、自動偵測「套用」、讀取舊設定）一律四捨五入成整數，範圍 40–240；自動偵測的建議值顯示為整數。引擎內部仍可接受小數（供稽核與測試），但所有玩家可見的設定都是整數。
+- **移除背景節拍器聲音**：遊戲中（含預備拍）不再播放任何節拍器 click；預備拍只保留畫面上的「1 2 3 4 → GO!」。移除「節拍器」開關與 `settings.metronome`。「試聽對拍」是玩家主動按下、用來確認 BPM 與偏移的工具，保留它的 click。
+- 除錯掛鉤：`start({ songId })` 可選內建曲；`getState()` 含 `songId`。
+
+### 稽核調整
+- Part A 依 `songs.json` 逐首分析三首內建曲（各自的 BPM），音符起點對八分網格平均誤差 ≤ 5 ms。
+- 遊戲中不再有節拍器：B7 改為驗證「遊戲中 metronome log 為空」，並在試聽模式下驗證 click 的排程誤差 ≤ 1 ms（或保留 B9b 離線渲染驗證 click 音色時間）。
+- 矩陣新增 `midnight-funk`（100 BPM）與 `starlight-runner`（112 BPM）各一組。
+
 ## 7. 除錯掛鉤與稽核
 
 - `pressAttack(instrument = 'kick')`；attack log 每筆新增 `instrument`、`unison`；world log 新增 `groove`。

@@ -354,6 +354,13 @@ export class Combat {
       fx.text(p.x, p.y - 172, '八分連斬!', { color: COLORS.back, size: 30, life: 1.0, rise: 36, channel: 'combo' });
     }
 
+    // Parry has priority over damage (director's ruling): resolve it BEFORE the hit can kill / shove / block the
+    // enemy, using its position at the strike tick. The hit's damage then lands on the stunned enemy (x2).
+    for (const e of g.enemies.slice()) {
+      if (e.dead || e.strikeTick === null || e.strikeTick === undefined || e.strikeTick !== a.tick) continue;
+      if (this._canParry(e) && typeof e.parry === 'function') e.parry(g, a, e.curEv);
+    }
+
     let hitAny = false;
     const targets = g.enemies.slice();
     for (const e of targets) {
